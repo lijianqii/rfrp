@@ -12,3 +12,6 @@ log = "0.4.28"
 serde_json = "1"
 chrono = "0.4.27"
 tokio = { workspace = true }
+serde = { version = "1.0.228", features = ["derive"] }
+tokio-util = { version = "0.7.17", features = ["full"] }
+tokio-stream = { version = "0.1.17", features = ["full"] }

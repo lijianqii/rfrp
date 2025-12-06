@@ -1,39 +1,28 @@
 use chrono::Local;
 use clap::Parser;
-use log::{error, info, trace};
-use serde_json::Value;
+use log::{error, info};
+use serde::{Deserialize, Serialize};
 use std::io::Write;
-use tokio::io::{AsyncReadExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
-use tokio::task;
+use tokio_stream::StreamExt;
+use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-const RFRP_SERVER_IP: &str = "server_ip";
-const RFRP_SERVER_PORT: &str = "server_port";
-const RFRP_AUTH_TOKEN: &str = "auth_token";
-
-const RFRP_CLIENT_PROXY: &str = "client_proxy";
-
-const RFRP_PROXY_NAME: &str = "name";
-const RFRP_BIND_PORT: &str = "bind_port";
-const RFRP_PROXY_IP: &str = "proxy_ip";
-const RFRP_PROXY_PORT: &str = "proxy_port";
-const RFRP_PROXY_CON_TYPE: &str = "proxy_con_type";
-
-const RFRP_RUNNING_MODE: &str = "running_mode";
-
+#[derive(Serialize, Deserialize, Debug)]
 enum RunningMode {
     Server,
     Client,
-    Unknown
+    Unknown,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 struct ServerInfo {
     server_ip: String,
     server_port: u16,
     auth_token: String,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 struct ClientInfo {
     name: String,
     bind_port: u16,
@@ -42,83 +31,24 @@ struct ClientInfo {
     proxy_con_type: String,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 struct ConfigInfo {
-    server: ServerInfo,
-    clients: Vec<ClientInfo>,
-    config_path: String,
     running_mode: RunningMode,
+    server: ServerInfo,
+    client_proxy: Vec<ClientInfo>,
 }
 
-impl ConfigInfo {
-    fn get_proxy_clients_count(&self) -> usize {
-        self.clients.len()
-    }
+#[derive(Serialize, Deserialize, Debug)]
+enum RfrpFrame {
+    Register(ClientInfo),
+    Control,
+    Data(Vec<u8>),
 }
 
-impl ConfigInfo {
-    fn load_config(config_path: String) -> Self {
-        trace!("Loading config from [{}]", config_path);
-
-        let contents = match std::fs::read_to_string(&config_path) {
-            Ok(contents) => contents,
-            Err(e) => {
-                error!("Failed read config file.");
-                panic!("Error: {}", e);
-            }
-        };
-
-        let configs: Value = serde_json::from_str(contents.as_str()).unwrap();
-
-        let server_info = ServerInfo {
-            server_ip: configs[RFRP_SERVER_IP].as_str().unwrap().to_string(),
-            server_port: configs[RFRP_SERVER_PORT].as_u64().unwrap() as u16,
-            auth_token: configs[RFRP_AUTH_TOKEN].as_str().unwrap().to_string(),
-        };
-
-        trace!("Server info: {}:{}", server_info.server_ip, server_info.server_port);
-
-        let running_mode = match configs[RFRP_RUNNING_MODE].as_str().unwrap() {
-            "server" => RunningMode::Server,
-            "client" => RunningMode::Client,
-            _ => {
-                error!("Unknown running mode: {}", configs[RFRP_RUNNING_MODE].as_str().unwrap());
-                RunningMode::Unknown
-            }
-        };
-
-        trace!("Running mode: {}", match running_mode {
-            RunningMode::Server => "server",
-            RunningMode::Client => "client",
-            RunningMode::Unknown => "invalid running mode"
-        });
-
-        let auth_token = configs[RFRP_AUTH_TOKEN].as_str().unwrap().to_string();
-
-        let mut clients_vec = vec![];
-        for client in configs[RFRP_CLIENT_PROXY].as_array().unwrap() {
-            clients_vec.push(ClientInfo {
-                name: client[RFRP_PROXY_NAME].as_str().unwrap().to_string(),
-                bind_port: client[RFRP_BIND_PORT].as_u64().unwrap() as u16,
-                proxy_ip: client[RFRP_PROXY_IP].as_str().unwrap().to_string(),
-                proxy_port: client[RFRP_PROXY_PORT].as_u64().unwrap() as u16,
-                proxy_con_type: client[RFRP_PROXY_CON_TYPE].as_str().unwrap().to_string(),
-            })
-        };
-
-        for client in &clients_vec {
-            trace!("Client: [{}] proxy {}:{} <=> {} via {}",
-                client.name, client.proxy_ip,
-                client.proxy_port, client.bind_port,
-                client.proxy_con_type);
-        }
-
-        ConfigInfo {
-            server: server_info,
-            clients: clients_vec,
-            config_path: config_path,
-            running_mode: running_mode,
-        }
-    }
+enum RfrpErrorCode {
+    _RfrpOk = 0,
+    RfrpConfigError = 1,
+    RfrpRunningModeUnknown = 2,
 }
 
 #[derive(Parser, Debug)]
@@ -148,71 +78,82 @@ pub fn rfrp_main() {
 
     let args = Args::parse();
 
-    let config_info = ConfigInfo::load_config(args.config);
+    let file = match std::fs::File::open(&args.config) {
+        Ok(file) => file,
+        Err(e) => {
+            error!("Error while loading config file: {}", e);
+            std::process::exit(RfrpErrorCode::RfrpConfigError as i32);
+        }
+    };
 
-    rfrp_run(config_info);
+    let configs: ConfigInfo = match serde_json::from_reader(file) {
+        Ok(configs) => configs,
+        Err(e) => {
+            error!("Error while parsing config strings: {}", e);
+            std::process::exit(RfrpErrorCode::RfrpConfigError as i32);
+        }
+    };
+
+    rfrp_fun(configs)
 }
 
-fn rfrp_run(config: ConfigInfo) {
-    match config.running_mode {
+fn rfrp_fun(configs: ConfigInfo) {
+    match configs.running_mode {
         RunningMode::Server => {
-            info!("Running as server mode");
-            let server = rfrp_run_server(config);
-            let rt = Runtime::new().unwrap();
-
-            rt.block_on(server);
+            let server = rfrp_run_server(configs);
+            Runtime::new().unwrap().block_on(server);
         }
         RunningMode::Client => {
-            info!("Running as client mode");
-            //rfrp_run_client(config);
+            info!("Running on client mode");
+            todo!() //rfrp_run_client(configs.server);
         }
         RunningMode::Unknown => {
-            error!("Cannot run unknown mode");
-            panic!("Unknown mode");
+            error!("Can not run in mode: {:?}", configs.running_mode);
+            std::process::exit(RfrpErrorCode::RfrpRunningModeUnknown as i32);
         }
     }
 }
 
-async fn rfrp_run_server(config: ConfigInfo) {
-    let bind_addr = format!("{}:{}", config.server.server_ip, config.server.server_port);
+async fn rfrp_run_server(configs: ConfigInfo) {
+    info!(
+        "Running on server mode, bind addr {}:{}",
+        configs.server.server_ip, configs.server.server_port
+    );
 
-    trace!("Binding to: {}", bind_addr);
-
-    let server = TcpListener::bind(bind_addr).await.unwrap();
+    let server = TcpListener::bind(format!(
+        "{}:{}",
+        configs.server.server_ip, configs.server.server_port
+    ))
+    .await
+    .unwrap();
 
     loop {
-        let (socket, peer) = server.accept().await.unwrap();
-        trace!("Client connected: {}", peer);
-
-        task::spawn(process_server(socket));
-    }
-}
-
-async fn process_server(mut client: TcpStream) {
-    let mut buf = [0u8; 1024];
-    loop {
-        match client.read(&mut buf).await {
-            Ok(n) => {
-                if n == 0 {
-                    info!("Client {} disconnected", client.peer_addr().unwrap());
-                    break;
-                } else {
-                    info!("Client {} read: {} bytes", client.peer_addr().unwrap(), n);
-                }
+        let (client, peer) = match server.accept().await {
+            Ok((client, peer)) => {
+                info!("Accepted connection from {}", peer);
+                (client, peer)
             }
             Err(e) => {
-                error!("Error reading from client: {}", e);
-                break;
+                error!("Error while accepting connection: {}", e);
+                continue;
             }
         };
-    }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+        let (reader, writer) = tokio::io::split(client);
 
-    #[test]
-    fn it_works() {
+        let mut rd = FramedRead::new(reader, LengthDelimitedCodec::new());
+        let mut wr = FramedWrite::new(writer, LengthDelimitedCodec::new());
+
+        //第一次接收到的数据应该是终端的注册数据
+        let reg_msg: RfrpFrame =
+            serde_json::from_slice(rd.next().await.unwrap().unwrap().as_ref()).unwrap();
+
+        match reg_msg {
+            RfrpFrame::Register(client_info) => {}
+
+            RfrpFrame::Control => {}
+
+            RfrpFrame::Data(data) => {}
+        }
     }
 }
