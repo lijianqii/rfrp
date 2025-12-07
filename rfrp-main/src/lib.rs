@@ -3,8 +3,10 @@ use clap::Parser;
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
+use tokio::task;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
@@ -39,10 +41,16 @@ struct ConfigInfo {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+struct DataInfo {
+    client_info: ClientInfo,
+    data: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 enum RfrpFrame {
     Register(ClientInfo),
     Control,
-    Data(Vec<u8>),
+    Data(DataInfo),
 }
 
 enum RfrpErrorCode {
@@ -139,21 +147,50 @@ async fn rfrp_run_server(configs: ConfigInfo) {
             }
         };
 
-        let (reader, writer) = tokio::io::split(client);
+        task::spawn(rfrp_run_proxy(client));
+    }
+}
 
-        let mut rd = FramedRead::new(reader, LengthDelimitedCodec::new());
-        let mut wr = FramedWrite::new(writer, LengthDelimitedCodec::new());
+async fn rfrp_run_proxy(client: TcpStream) {
+    let (reader, writer) = client.into_split();
 
-        //第一次接收到的数据应该是终端的注册数据
-        let reg_msg: RfrpFrame =
-            serde_json::from_slice(rd.next().await.unwrap().unwrap().as_ref()).unwrap();
+    let (tx_channel, rx_channel) = mpsc::channel::<RfrpFrame>(128);
 
-        match reg_msg {
-            RfrpFrame::Register(client_info) => {}
+    let mut reader = FramedRead::new(reader, LengthDelimitedCodec::new());
+    let writer = FramedWrite::new(writer, LengthDelimitedCodec::new());
 
-            RfrpFrame::Control => {}
+    let reg_frame: RfrpFrame =
+        serde_json::from_slice(reader.next().await.unwrap().unwrap().as_ref()).unwrap();
 
-            RfrpFrame::Data(data) => {}
+    let bind_addr = match reg_frame {
+        RfrpFrame::Register(client_info) => {
+            match TcpListener::bind(format!("0.0.0.0:{}", client_info.bind_port)).await {
+                Ok(listener) => {
+                    info!("Bind to {}", client_info.bind_port);
+                    listener
+                }
+                Err(e) => {
+                    error!("");
+                    return;
+                }
+            }
         }
+        _ => {
+            error!("First frame is not a register frame: {:?}", reg_frame);
+            return;
+        }
+    };
+
+    loop {
+        let remote = match bind_addr.accept().await {
+            Ok((remote_stream, remote_addr)) => {
+                info!("Accepted connection from {}", remote_addr);
+                remote_stream
+            },
+            Err(e) => {
+                error!("Error while accepting connection: {}", e);
+                continue;
+            }
+        };
     }
 }
