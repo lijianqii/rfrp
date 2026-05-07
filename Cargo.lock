@@ -508,6 +508,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rfrp-client"
+version = "0.1.0"
+
+[[package]]
+name = "rfrp-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rfrp-main"
 version = "0.1.0"
 dependencies = [
@@ -515,12 +527,17 @@ dependencies = [
  "clap",
  "env_logger",
  "log",
+ "rfrp-config",
  "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
  "tokio-util",
 ]
+
+[[package]]
+name = "rfrp-server"
+version = "0.1.0"
 
 [[package]]
 name = "rustversion"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["rfrp", "rfrp-main"]
+members = ["rfrp", "rfrp-client", "rfrp-config", "rfrp-main", "rfrp-server"]
 resolver = "3"
 
 [workspace.package]

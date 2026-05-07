@@ -1,6 +1,7 @@
 use chrono::Local;
 use clap::Parser;
 use log::{error, info};
+use rfrp_config::config_info::base_info_getter::BaseInfoGetter;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use tokio::net::{TcpListener, TcpStream};
@@ -9,36 +10,9 @@ use tokio::sync::mpsc;
 use tokio::task;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
-
-#[derive(Serialize, Deserialize, Debug)]
-enum RunningMode {
-    Server,
-    Client,
-    Unknown,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ServerInfo {
-    server_ip: String,
-    server_port: u16,
-    auth_token: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ClientInfo {
-    name: String,
-    bind_port: u16,
-    proxy_ip: String,
-    proxy_port: u16,
-    proxy_con_type: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ConfigInfo {
-    running_mode: RunningMode,
-    server: ServerInfo,
-    client_proxy: Vec<ClientInfo>,
-}
+use rfrp_config::config_info::base_types::{ConfigInfo, ServerInfo};
+use rfrp_config::config_info::base_types::ClientInfo;
+use rfrp_config::config_info::base_types::RunningMode;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct DataInfo {
@@ -53,8 +27,8 @@ enum RfrpFrame {
     Data(DataInfo),
 }
 
-enum RfrpErrorCode {
-    _RfrpOk = 0,
+pub enum RfrpErrorCode {
+    RfrpOk = 0,
     RfrpConfigError = 1,
     RfrpRunningModeUnknown = 2,
 }
@@ -66,7 +40,7 @@ struct Args {
     config: String,
 }
 
-pub fn rfrp_main() {
+pub fn rfrp_main() -> RfrpErrorCode {
     env_logger::Builder::new()
         .filter(None, log::LevelFilter::Trace)
         .write_style(env_logger::WriteStyle::Always)
@@ -90,7 +64,7 @@ pub fn rfrp_main() {
         Ok(file) => file,
         Err(e) => {
             error!("Error while loading config file: {}", e);
-            std::process::exit(RfrpErrorCode::RfrpConfigError as i32);
+            return RfrpErrorCode::RfrpConfigError;
         }
     };
 
@@ -98,39 +72,41 @@ pub fn rfrp_main() {
         Ok(configs) => configs,
         Err(e) => {
             error!("Error while parsing config strings: {}", e);
-            std::process::exit(RfrpErrorCode::RfrpConfigError as i32);
+            return RfrpErrorCode::RfrpConfigError;
         }
     };
 
-    rfrp_fun(configs)
+    rfrp_fun(configs);
+
+    return RfrpErrorCode::RfrpOk;
 }
 
 fn rfrp_fun(configs: ConfigInfo) {
     match configs.running_mode {
         RunningMode::Server => {
-            let server = rfrp_run_server(configs);
+            let server = rfrp_run_server(configs.server);
             Runtime::new().unwrap().block_on(server);
         }
         RunningMode::Client => {
             info!("Running on client mode");
             todo!() //rfrp_run_client(configs.server);
         }
-        RunningMode::Unknown => {
+        _ => {
             error!("Can not run in mode: {:?}", configs.running_mode);
             std::process::exit(RfrpErrorCode::RfrpRunningModeUnknown as i32);
         }
     }
 }
 
-async fn rfrp_run_server(configs: ConfigInfo) {
+async fn rfrp_run_server(server: ServerInfo) {
     info!(
         "Running on server mode, bind addr {}:{}",
-        configs.server.server_ip, configs.server.server_port
+        server.get_ip(), server.get_port()
     );
 
     let server = TcpListener::bind(format!(
         "{}:{}",
-        configs.server.server_ip, configs.server.server_port
+        server.get_ip(), server.get_port()
     ))
     .await
     .unwrap();
@@ -138,7 +114,6 @@ async fn rfrp_run_server(configs: ConfigInfo) {
     loop {
         let (client, peer) = match server.accept().await {
             Ok((client, peer)) => {
-                info!("Accepted connection from {}", peer);
                 (client, peer)
             }
             Err(e) => {
@@ -146,6 +121,8 @@ async fn rfrp_run_server(configs: ConfigInfo) {
                 continue;
             }
         };
+
+        info!("Accepted connection from {}", peer);
 
         task::spawn(rfrp_run_proxy(client));
     }
@@ -164,13 +141,13 @@ async fn rfrp_run_proxy(client: TcpStream) {
 
     let bind_addr = match reg_frame {
         RfrpFrame::Register(client_info) => {
-            match TcpListener::bind(format!("0.0.0.0:{}", client_info.bind_port)).await {
+            match TcpListener::bind(format!("0.0.0.0:{}", client_info.get_bind_port())).await {
                 Ok(listener) => {
-                    info!("Bind to {}", client_info.bind_port);
+                    info!("Bind to {}", client_info.get_bind_port());
                     listener
                 }
                 Err(e) => {
-                    error!("");
+                    error!("Bind to [{}] failed, please check your port: {}", client_info.get_bind_port(), e);
                     return;
                 }
             }
@@ -192,5 +169,9 @@ async fn rfrp_run_proxy(client: TcpStream) {
                 continue;
             }
         };
+        // 这里处理接收到了请求之后的处理，应该通过tx_channel把数据帧放到队列里面，然后发出去，再由rx_channel接收到了之后发到对端
+        task::spawn(async move {
+            // 把对端的接收和发送分开处理
+        });
     }
 }
