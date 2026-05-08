@@ -6,4 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+env_logger = "0.11.8"
+chrono = "0.4.27"
+log = { workspace = true }
 rfrp_main = { path = "../rfrp_main" }

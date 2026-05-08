@@ -1,9 +1,7 @@
-use chrono::Local;
 use clap::Parser;
 use log::{error, info};
 use rfrp_config::config_info::base_info_getter::BaseInfoGetter;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
@@ -41,22 +39,6 @@ struct Args {
 }
 
 pub fn rfrp_main() -> RfrpErrorCode {
-    env_logger::Builder::new()
-        .filter(None, log::LevelFilter::Trace)
-        .write_style(env_logger::WriteStyle::Always)
-        .format(|buf, record| {
-            writeln!(
-                buf,
-                "{} | {:>6} | {}:{:<4} | {} | - {}",
-                Local::now().format("%Y-%m-%d %H:%M:%S"),
-                record.level(),
-                record.file().unwrap_or(""),
-                record.line().unwrap_or(0),
-                record.module_path().unwrap_or(""),
-                record.args()
-            )
-        })
-        .init();
 
     let args = Args::parse();
 
