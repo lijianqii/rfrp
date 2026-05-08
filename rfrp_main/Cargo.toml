@@ -1,5 +1,5 @@
 [package]
-name = "rfrp-main"
+name = "rfrp_main"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,4 +15,4 @@ tokio = { workspace = true }
 serde = { version = "1.0.228", features = ["derive"] }
 tokio-util = { version = "0.7.17", features = ["full"] }
 tokio-stream = { version = "0.1.17", features = ["full"] }
-rfrp-config = { path = "../rfrp-config" }
+rfrp_config = { path = "../rfrp_config" }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["rfrp", "rfrp-client", "rfrp-config", "rfrp-main", "rfrp-server"]
+members = ["rfrp", "rfrp_client", "rfrp_config", "rfrp_main", "rfrp_server"]
 resolver = "3"
 
 [workspace.package]
@@ -10,3 +10,4 @@ authors = ["lijianqii"]
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
+log = "0.4.28"
