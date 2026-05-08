@@ -10,9 +10,9 @@ pub enum RunningMode {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ConfigInfo {
-    pub running_mode: RunningMode,
-    pub server: ServerInfo,
-    pub client_proxy: Vec<ClientInfo>,
+    running_mode: RunningMode,
+    server: ServerInfo,
+    client_proxy: Vec<ClientInfo>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -31,9 +31,37 @@ pub struct ClientInfo {
     proxy_con_type: String,
 }
 
+impl ConfigInfo {
+    pub fn get_running_mode(&self) -> &RunningMode {
+        &self.running_mode
+    }
+
+    pub fn get_server(&self) -> &ServerInfo {
+        &self.server
+    }
+
+    pub fn get_client_proxy(&self) -> &Vec<ClientInfo> {
+        &self.client_proxy
+    }
+}
+
 impl ClientInfo {
     pub fn get_bind_port(&self) -> u16 {
         self.bind_port
+    }
+
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn get_proxy_con_type(&self) -> &str {
+        &self.proxy_con_type
+    }
+}
+
+impl ServerInfo {
+    pub fn get_auth_token(&self) -> &str {
+        &self.auth_token
     }
 }
 

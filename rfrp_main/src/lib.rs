@@ -60,21 +60,9 @@ pub fn rfrp_main() -> RfrpErrorCode {
 
     let args = Args::parse();
 
-    let file = match std::fs::File::open(&args.config) {
-        Ok(file) => file,
-        Err(e) => {
-            error!("Error while loading config file: {}", e);
-            return RfrpErrorCode::RfrpConfigError;
-        }
-    };
+    let configs = ConfigInfo::new(&args.config);
 
-    let configs: ConfigInfo = match serde_json::from_reader(file) {
-        Ok(configs) => configs,
-        Err(e) => {
-            error!("Error while parsing config strings: {}", e);
-            return RfrpErrorCode::RfrpConfigError;
-        }
-    };
+    configs.debug_info();
 
     rfrp_fun(configs);
 
@@ -82,9 +70,9 @@ pub fn rfrp_main() -> RfrpErrorCode {
 }
 
 fn rfrp_fun(configs: ConfigInfo) {
-    match configs.running_mode {
+    match configs.get_running_mode() {
         RunningMode::Server => {
-            let server = rfrp_run_server(configs.server);
+            let server = rfrp_run_server(configs.get_server());
             Runtime::new().unwrap().block_on(server);
         }
         RunningMode::Client => {
@@ -92,13 +80,13 @@ fn rfrp_fun(configs: ConfigInfo) {
             todo!() //rfrp_run_client(configs.server);
         }
         _ => {
-            error!("Can not run in mode: {:?}", configs.running_mode);
+            error!("Can not run in mode: {:?}", configs.get_running_mode());
             std::process::exit(RfrpErrorCode::RfrpRunningModeUnknown as i32);
         }
     }
 }
 
-async fn rfrp_run_server(server: ServerInfo) {
+async fn rfrp_run_server(server: &ServerInfo) {
     info!(
         "Running on server mode, bind addr {}:{}",
         server.get_ip(), server.get_port()
