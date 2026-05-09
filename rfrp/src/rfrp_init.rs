@@ -8,7 +8,7 @@ pub fn init_logging() {
         .format(|buf, record| {
             writeln!(
                 buf,
-                "{} | {:>6} | {}:{:<4} | {} | - {}",
+                "{} | {:>6} | {:<}:{:<4} | {} | - {}",
                 Local::now().format("%Y-%m-%d %H:%M:%S"),
                 record.level(),
                 record.file().unwrap_or(""),

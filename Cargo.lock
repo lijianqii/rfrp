@@ -538,11 +538,18 @@ dependencies = [
  "clap",
  "log",
  "rfrp_config",
+ "rfrp_proto",
+ "rfrp_server",
+ "tokio",
+]
+
+[[package]]
+name = "rfrp_proto"
+version = "0.1.0"
+dependencies = [
+ "rfrp_config",
  "serde",
  "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-util",
 ]
 
 [[package]]
@@ -551,7 +558,10 @@ version = "0.1.0"
 dependencies = [
  "log",
  "rfrp_config",
+ "rfrp_proto",
  "tokio",
+ "tokio-stream",
+ "tokio-util",
 ]
 
 [[package]]

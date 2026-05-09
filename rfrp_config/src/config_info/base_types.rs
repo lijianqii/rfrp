@@ -9,6 +9,18 @@ pub enum RunningMode {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct ControlInfo {
+    command: String,
+    args: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DataInfo {
+    client: ClientInfo,
+    data: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ConfigInfo {
     running_mode: RunningMode,
     server: ServerInfo,
