@@ -5,12 +5,6 @@ use rfrp_config::config_info::base_types::RunningMode;
 use rfrp_config::config_info::base_types::ConfigInfo;
 use rfrp_server::rfrp_server;
 
-pub enum RfrpErrorCode {
-    RfrpOk = 0,
-    RfrpConfigError = 1,
-    RfrpRunningModeUnknown = 2,
-}
-
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {

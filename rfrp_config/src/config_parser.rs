@@ -1,6 +1,6 @@
 use super::config_info::base_types::ConfigInfo;
 use super::config_info::base_types::RunningMode;
-use super::config_info::base_info_getter::BaseInfoGetter;
+use super::config_info::base_info_ops::BaseInfoGetter;
 use log::{debug, warn};
 use std::net::{Ipv4Addr, Ipv6Addr};
 

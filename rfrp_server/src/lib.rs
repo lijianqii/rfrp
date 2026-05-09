@@ -1,7 +1,7 @@
 mod run_proxy;
 
 use rfrp_config::config_info::base_types::ConfigInfo;
-use rfrp_config::config_info::base_info_getter::BaseInfoGetter;
+use rfrp_config::config_info::base_info_ops::BaseInfoGetter;
 use log::info;
 use log::error;
 

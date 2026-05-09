@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::config_info::base_info_getter::BaseInfoGetter;
+use crate::config_info::base_info_ops::BaseInfoGetter;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RunningMode {
