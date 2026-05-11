@@ -41,12 +41,7 @@ pub struct ClientInfo {
     proxy_ip: String,
     proxy_port: u16,
     proxy_con_type: String,
-}
-
-impl ConfigInfo {
-    pub fn get_clients(&self) -> &Vec<ClientInfo> {
-        &self.client_proxy
-    }
+    registed: bool,
 }
 
 impl ConfigInfo {
@@ -74,6 +69,14 @@ impl ClientInfo {
 
     pub fn get_proxy_con_type(&self) -> &str {
         &self.proxy_con_type
+    }
+
+    pub fn is_registed(&self) -> bool {
+        self.registed
+    }
+
+    pub fn set_registed(&mut self, registed: bool) {
+        self.registed = registed;
     }
 }
 

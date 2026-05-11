@@ -17,7 +17,7 @@ pub async fn handle_reg_frame(client_info: ClientInfo, tx_channel: Sender<RfrpFr
         }
     };
 
-    let confirm_reg = RfrpFrame::new_reg_frame(&client_info);
+    let confirm_reg = RfrpFrame::new_reg_frame(&client_info, true);
     tx_channel.send(confirm_reg).await.unwrap();
 
     loop {

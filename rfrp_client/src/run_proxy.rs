@@ -13,10 +13,10 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
     let mut reader = FramedRead::new(reader, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(writer, LengthDelimitedCodec::new());
 
-    for client_info in config.get_clients() {
+    for client_info in config.get_client_proxy() {
         debug!("Registering client: {:?}", client_info);
 
-        let reg_frame = RfrpFrame::new_reg_frame(&client_info);
+        let reg_frame = RfrpFrame::new_reg_frame(&client_info, false);
         let bytes = RfrpFrame::encode(&reg_frame);
 
         writer.send(Bytes::from(bytes)).await.unwrap();
@@ -34,7 +34,7 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
 
         match reg_resp_frame {
             RfrpFrame::Register(client) => {
-                if client.get_name() == client_info.get_name() {
+                if client.is_registed() {
                     info!("Registed client proxy: {:?}", client_info.get_name());
                 } else {
                     error!("Proxy {} reg failed.", client_info.get_name());

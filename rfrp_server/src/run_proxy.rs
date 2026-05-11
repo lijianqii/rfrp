@@ -31,7 +31,7 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                 let bytes = frame.unwrap();
                 RfrpFrame::decode(&bytes)
             },
-            None => continue,
+            None => break,
         };
 
         match frame {

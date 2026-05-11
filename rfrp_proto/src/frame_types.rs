@@ -19,7 +19,9 @@ impl RfrpFrame {
         })
     }
 
-    pub fn new_reg_frame(client_info: &ClientInfo) -> Self {
-        RfrpFrame::Register(client_info.clone())
+    pub fn new_reg_frame(client_info: &ClientInfo, registed: bool) -> Self {
+        let mut client_info = client_info.clone();
+        client_info.set_registed(registed);
+        RfrpFrame::Register(client_info)
     }
 }
