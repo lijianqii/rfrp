@@ -10,7 +10,7 @@ tokio = { workspace = true }
 log = { workspace = true }
 rfrp_config = { path = "../rfrp_config" }
 rfrp_proto = { path = "../rfrp_proto" }
-tokio-util = { version = "0.7.17", features = ["full"] }
-tokio-stream = { version = "0.1.17", features = ["full"] }
-futures = { version = "0.3.32" }
-bytes = { version = "1" }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }

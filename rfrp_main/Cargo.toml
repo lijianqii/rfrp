@@ -11,4 +11,5 @@ log = { workspace = true }
 tokio = { workspace = true }
 rfrp_config = { path = "../rfrp_config" }
 rfrp_server = { path = "../rfrp_server" }
+rfrp_client = { path = "../rfrp_client" }
 rfrp_proto = { path = "../rfrp_proto" }

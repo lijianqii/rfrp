@@ -10,14 +10,14 @@ pub enum RunningMode {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ControlInfo {
-    command: String,
-    args: Vec<String>,
+    pub command: String,
+    pub args: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DataInfo {
-    client: ClientInfo,
-    data: Vec<u8>,
+    pub client: ClientInfo,
+    pub data: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -34,13 +34,19 @@ pub struct ServerInfo {
     auth_token: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ClientInfo {
     name: String,
     bind_port: u16,
     proxy_ip: String,
     proxy_port: u16,
     proxy_con_type: String,
+}
+
+impl ConfigInfo {
+    pub fn get_clients(&self) -> &Vec<ClientInfo> {
+        &self.client_proxy
+    }
 }
 
 impl ConfigInfo {

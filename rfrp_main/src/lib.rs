@@ -4,6 +4,7 @@ use tokio::runtime::Runtime;
 use rfrp_config::config_info::base_types::RunningMode;
 use rfrp_config::config_info::base_types::ConfigInfo;
 use rfrp_server::rfrp_server;
+use rfrp_client::rfrp_client;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -31,7 +32,8 @@ fn rfrp_run(configs: ConfigInfo) {
         }
         RunningMode::Client => {
             info!("Running on client mode");
-            todo!() //rfrp_run_client(configs.server);
+            let client = rfrp_client(configs);
+            Runtime::new().unwrap().block_on(client);
         }
         _ => {
             error!("Can not run in mode: {:?}", configs.get_running_mode());
