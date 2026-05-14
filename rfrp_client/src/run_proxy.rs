@@ -1,11 +1,21 @@
 use rfrp_proto::frame_types::RfrpFrame;
 use tokio::net::TcpStream;
-use log::{debug, error, info};
-use rfrp_config::config_info::base_types::ConfigInfo;
+use log::{debug, error, info, warn};
+use rfrp_config::config_info::base_types::{ClientInfo, ConfigInfo};
+use rfrp_config::config_info::base_info_ops::BaseInfoGetter;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use bytes::Bytes;
 use futures::SinkExt;
 use tokio_stream::StreamExt;
+use tokio::sync::mpsc;
+use tokio::task;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::Arc;
+use std::collections::HashMap;
+use tokio::sync::Mutex;
+
+/// Manages persistent connections to internal services, keyed by conn_id.
+type InternalConnMap = Arc<Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>>;
 
 pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
     let (reader, writer) = remote.into_split();
@@ -13,38 +23,269 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
     let mut reader = FramedRead::new(reader, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(writer, LengthDelimitedCodec::new());
 
-    for client_info in config.get_client_proxy() {
-        debug!("Registering client: {:?}", client_info);
+    // Channel for serializing all writes to the server
+    let (tx_to_server, mut rx_to_server) = mpsc::channel::<RfrpFrame>(128);
 
-        let reg_frame = RfrpFrame::new_reg_frame(&client_info, false);
-        let bytes = RfrpFrame::encode(&reg_frame);
-
-        writer.send(Bytes::from(bytes)).await.unwrap();
-
-        let reg_resp_frame: RfrpFrame = match reader.next().await {
-            Some(frame) => {
-                let bytes = frame.unwrap();
-                RfrpFrame::decode(&bytes).unwrap()
-            },
-            None => {
-                error!("Proxy {} reg failed.", client_info.get_name());
-                continue;
-            },
-        };
-
-        match reg_resp_frame {
-            RfrpFrame::Register(client) => {
-                if client.is_registed() {
-                    info!("Registed client proxy: {:?}", client_info.get_name());
-                } else {
-                    error!("Proxy {} reg failed.", client_info.get_name());
-                    continue;
-                }
+    // Spawn a task that writes frames to the server
+    let write_task = task::spawn(async move {
+        while let Some(frame) = rx_to_server.recv().await {
+            let bytes = RfrpFrame::encode(&frame);
+            if let Err(e) = writer.send(Bytes::from(bytes)).await {
+                error!("Failed to send frame to server: {}", e);
+                break;
             }
-            _ => {
-                error!("Proxy {} reg failed.", client_info.get_name());
-                continue;
+        }
+        info!("Write task ended");
+    });
+
+    // Phase 1: Register all proxies
+    for client_info in config.get_client_proxy() {
+        debug!("Registering client proxy: {}", client_info.get_name());
+
+        let reg_frame = RfrpFrame::new_reg_frame(client_info, false);
+
+        if let Err(e) = tx_to_server.send(reg_frame).await {
+            error!("Failed to send register frame: {}", e);
+            return;
+        }
+
+        // Wait for registration confirmation from server
+        match reader.next().await {
+            Some(Ok(resp_bytes)) => match RfrpFrame::decode(&resp_bytes) {
+                Ok(RfrpFrame::Register(client)) => {
+                    if client.is_registed() {
+                        info!(
+                            "Successfully registered proxy '{}' on bind_port {}",
+                            client.get_name(),
+                            client.get_bind_port()
+                        );
+                    } else {
+                        error!(
+                            "Server rejected registration for proxy '{}'",
+                            client_info.get_name()
+                        );
+                    }
+                }
+                Ok(other) => {
+                    error!(
+                        "Unexpected frame during registration for '{}': {:?}",
+                        client_info.get_name(),
+                        other
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to decode registration response for '{}': {}",
+                        client_info.get_name(),
+                        e
+                    );
+                }
+            },
+            Some(Err(e)) => {
+                error!(
+                    "Read error during registration for '{}': {}",
+                    client_info.get_name(),
+                    e
+                );
+                return;
+            }
+            None => {
+                error!(
+                    "Server closed connection during registration for '{}'",
+                    client_info.get_name()
+                );
+                return;
             }
         }
     }
+
+    info!("All proxies registered, entering data forwarding loop");
+
+    // Map of conn_id → sender to internal service TCP connection
+    let internal_conns: InternalConnMap = Arc::new(Mutex::new(HashMap::new()));
+
+    // Phase 2: Main loop — forward data between server and internal services
+    loop {
+        let bytes = match reader.next().await {
+            Some(Ok(bytes)) => bytes,
+            Some(Err(e)) => {
+                error!("Read error from server: {}", e);
+                break;
+            }
+            None => {
+                info!("Server closed connection");
+                break;
+            }
+        };
+
+        let frame = match RfrpFrame::decode(&bytes) {
+            Ok(frame) => frame,
+            Err(e) => {
+                error!("Failed to decode frame: {}", e);
+                continue;
+            }
+        };
+
+        match frame {
+            RfrpFrame::Data(data_info) => {
+                let conn_id = data_info.conn_id;
+                let tx_to_server = tx_to_server.clone();
+                let conns = internal_conns.clone();
+                let client_info = data_info.client.clone();
+
+                // Get or create a connection to the internal service
+                let sender = get_or_create_internal_conn(
+                    &conns,
+                    conn_id,
+                    &client_info,
+                    tx_to_server,
+                )
+                .await;
+
+                match sender {
+                    Some(sender) => {
+                        if let Err(e) = sender.send(data_info.data).await {
+                            error!(
+                                "Failed to forward data to internal service for conn {}: {}",
+                                conn_id, e
+                            );
+                            // Clean up broken connection
+                            conns.lock().await.remove(&conn_id);
+                        }
+                    }
+                    None => {
+                        error!(
+                            "Could not establish connection to internal service {} for conn {}",
+                            client_info.get_addr(),
+                            conn_id
+                        );
+                    }
+                }
+            }
+            RfrpFrame::Control(control_info) => {
+                debug!("Received control frame: {:?}", control_info);
+            }
+            RfrpFrame::Register(client) => {
+                warn!(
+                    "Unexpected register frame for proxy '{}' in main loop",
+                    client.get_name()
+                );
+            }
+        }
+    }
+
+    // Abort the write task so it doesn't hang
+    write_task.abort();
+    info!("Client proxy session ended");
+}
+
+/// Get an existing internal connection for `conn_id`, or create a new one.
+async fn get_or_create_internal_conn(
+    conns: &InternalConnMap,
+    conn_id: u64,
+    client_info: &ClientInfo,
+    tx_to_server: mpsc::Sender<RfrpFrame>,
+) -> Option<mpsc::Sender<Vec<u8>>> {
+    // Fast path: connection already exists
+    {
+        let map = conns.lock().await;
+        if let Some(sender) = map.get(&conn_id) {
+            return Some(sender.clone());
+        }
+    }
+
+    // Slow path: create a new connection to the internal service
+    let addr = client_info.get_addr();
+    info!(
+        "Opening new connection to internal service {} for conn {}",
+        addr, conn_id
+    );
+
+    let stream = match TcpStream::connect(&addr).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            error!(
+                "Failed to connect to internal service {} for conn {}: {}",
+                addr, conn_id, e
+            );
+            return None;
+        }
+    };
+
+    let (mut read_half, mut write_half) = stream.into_split();
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
+
+    // Insert into map
+    {
+        let mut map = conns.lock().await;
+        map.insert(conn_id, tx.clone());
+    }
+
+    // Spawn write task: forwards data from server → internal service
+    let ci_name = client_info.get_name().to_string();
+    let cid = conn_id;
+    task::spawn(async move {
+        while let Some(data) = rx.recv().await {
+            if let Err(e) = write_half.write_all(&data).await {
+                error!(
+                    "Failed to write to internal service for proxy '{}' conn {}: {}",
+                    ci_name, cid, e
+                );
+                break;
+            }
+        }
+        debug!(
+            "Write task for proxy '{}' conn {} ended",
+            ci_name, cid
+        );
+    });
+
+    // Spawn read task: reads responses from internal service → sends back to server
+    let ci = client_info.clone();
+    let cid = conn_id;
+    let conns_cleanup = Arc::clone(conns);
+    task::spawn(async move {
+        let mut buf = [0u8; 4096];
+        loop {
+            match read_half.read(&mut buf).await {
+                Ok(0) => {
+                    info!(
+                        "Internal service for proxy '{}' conn {} closed connection",
+                        ci.get_name(),
+                        cid
+                    );
+                    break;
+                }
+                Ok(n) => {
+                    let frame = RfrpFrame::new_data_frame(&buf[..n], &ci, cid);
+                    if tx_to_server.send(frame).await.is_err() {
+                        error!(
+                            "Failed to send response to server for proxy '{}' conn {}",
+                            ci.get_name(),
+                            cid
+                        );
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Read error from internal service for proxy '{}' conn {}: {}",
+                        ci.get_name(),
+                        cid,
+                        e
+                    );
+                    break;
+                }
+            }
+        }
+        // Clean up on disconnect
+        conns_cleanup.lock().await.remove(&cid);
+        info!(
+            "Cleaned up internal connection for proxy '{}' conn {}",
+            ci.get_name(),
+            cid
+        );
+    });
+
+    Some(tx)
 }

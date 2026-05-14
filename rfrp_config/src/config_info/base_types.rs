@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use crate::config_info::base_info_ops::BaseInfoGetter;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RunningMode {
     Server,
     Client,
@@ -16,18 +16,19 @@ pub struct ControlInfo {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DataInfo {
+    pub conn_id: u64,
     pub client: ClientInfo,
     pub data: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConfigInfo {
     running_mode: RunningMode,
     server: ServerInfo,
     client_proxy: Vec<ClientInfo>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ServerInfo {
     server_ip: String,
     server_port: u16,
