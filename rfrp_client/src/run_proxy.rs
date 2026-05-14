@@ -42,7 +42,7 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
     for client_info in config.get_client_proxy() {
         debug!("Registering client proxy: {}", client_info.get_name());
 
-        let reg_frame = RfrpFrame::new_reg_frame(client_info, false);
+        let reg_frame = RfrpFrame::Register(client_info.clone());
 
         if let Err(e) = tx_to_server.send(reg_frame).await {
             error!("Failed to send register frame: {}", e);
@@ -52,12 +52,12 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
         // Wait for registration confirmation from server
         match reader.next().await {
             Some(Ok(resp_bytes)) => match RfrpFrame::decode(&resp_bytes) {
-                Ok(RfrpFrame::Register(client)) => {
-                    if client.is_registed() {
+                Ok(RfrpFrame::RegisterAck(resp)) => {
+                    if resp.success {
                         info!(
                             "Successfully registered proxy '{}' on bind_port {}",
-                            client.get_name(),
-                            client.get_bind_port()
+                            resp.client.get_name(),
+                            resp.client.get_bind_port()
                         );
                     } else {
                         error!(
@@ -169,6 +169,12 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
                 warn!(
                     "Unexpected register frame for proxy '{}' in main loop",
                     client.get_name()
+                );
+            }
+            RfrpFrame::RegisterAck(resp) => {
+                warn!(
+                    "Unexpected register ack for proxy '{}' in main loop",
+                    resp.client.get_name()
                 );
             }
         }

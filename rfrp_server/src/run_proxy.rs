@@ -1,4 +1,4 @@
-use log::{error, info};
+use log::{error, info, warn};
 use tokio::net::TcpStream;
 use tokio::task;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -69,6 +69,9 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
             }
             RfrpFrame::Control(control_info) => {
                 info!("Control info: {:?}", control_info);
+            }
+            RfrpFrame::RegisterAck(_) => {
+                warn!("Unexpected RegisterAck frame received on server");
             }
             RfrpFrame::Data(data_info) => {
                 // Route response data from client back to the correct external connection

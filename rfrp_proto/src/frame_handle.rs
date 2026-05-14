@@ -38,7 +38,7 @@ pub async fn handle_reg_frame(
     };
 
     // Confirm registration to client
-    let confirm = RfrpFrame::new_reg_frame(&client_info, true);
+    let confirm = RfrpFrame::new_reg_ack_frame(&client_info, true);
     if tx_channel.send(confirm).await.is_err() {
         error!("Failed to send registration confirmation, channel closed");
         return;

@@ -42,7 +42,13 @@ pub struct ClientInfo {
     proxy_ip: String,
     proxy_port: u16,
     proxy_con_type: String,
-    registed: bool,
+}
+
+/// Server's response to a registration request.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RegisterResponse {
+    pub client: ClientInfo,
+    pub success: bool,
 }
 
 impl ConfigInfo {
@@ -72,13 +78,6 @@ impl ClientInfo {
         &self.proxy_con_type
     }
 
-    pub fn is_registed(&self) -> bool {
-        self.registed
-    }
-
-    pub fn set_registed(&mut self, registed: bool) {
-        self.registed = registed;
-    }
 }
 
 impl ServerInfo {

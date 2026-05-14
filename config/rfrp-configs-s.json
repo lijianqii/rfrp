@@ -13,16 +13,14 @@
             "bind_port": 22001,
             "proxy_ip": "192.168.1.192",
             "proxy_port": 22,
-            "proxy_con_type": "tcp",
-            "registed": false
+            "proxy_con_type": "tcp"
         },
         {
             "name": "example2",
             "bind_port": 22002,
             "proxy_ip": "192.168.1.91",
             "proxy_port": 22,
-            "proxy_con_type": "tcp",
-            "registed": false
+            "proxy_con_type": "tcp"
         }
     ]
 }
