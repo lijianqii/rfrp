@@ -1,4 +1,5 @@
 use rfrp_proto::frame_types::RfrpFrame;
+use rfrp_proto::crypto;
 use tokio::net::TcpStream;
 use log::{debug, error, info, warn};
 use rfrp_config::config_info::base_types::{ClientInfo, ConfigInfo};
@@ -18,6 +19,8 @@ use tokio::sync::Mutex;
 type InternalConnMap = Arc<Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>>;
 
 pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
+    let key = crypto::derive_key(config.get_server().get_auth_token());
+
     let (reader, writer) = remote.into_split();
 
     let mut reader = FramedRead::new(reader, LengthDelimitedCodec::new());
@@ -26,10 +29,10 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
     // Channel for serializing all writes to the server
     let (tx_to_server, mut rx_to_server) = mpsc::channel::<RfrpFrame>(128);
 
-    // Spawn a task that writes frames to the server
+    // Spawn a task that writes encrypted frames to the server
     let write_task = task::spawn(async move {
         while let Some(frame) = rx_to_server.recv().await {
-            let bytes = RfrpFrame::encode(&frame);
+            let bytes = RfrpFrame::encode_encrypted(&frame, &key);
             if let Err(e) = writer.send(Bytes::from(bytes)).await {
                 error!("Failed to send frame to server: {}", e);
                 break;
@@ -51,7 +54,7 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
 
         // Wait for registration confirmation from server
         match reader.next().await {
-            Some(Ok(resp_bytes)) => match RfrpFrame::decode(&resp_bytes) {
+            Some(Ok(resp_bytes)) => match RfrpFrame::decode_encrypted(&resp_bytes, &key) {
                 Ok(RfrpFrame::RegisterAck(resp)) => {
                     if resp.success {
                         info!(
@@ -118,7 +121,7 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
             }
         };
 
-        let frame = match RfrpFrame::decode(&bytes) {
+        let frame = match RfrpFrame::decode_encrypted(&bytes, &key) {
             Ok(frame) => frame,
             Err(e) => {
                 error!("Failed to decode frame: {}", e);

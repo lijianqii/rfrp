@@ -7,13 +7,15 @@ use rfrp_proto::frame_types::RfrpFrame;
 use tokio::sync::mpsc;
 use futures::SinkExt;
 use rfrp_proto::frame_handle::{handle_reg_frame, RoutingTable};
+use rfrp_proto::crypto;
 use bytes::Bytes;
 use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 
 pub async fn run_proxy(client: TcpStream, auth_token: String) {
-    info!("Auth token: {}", auth_token);
+    let key = crypto::derive_key(&auth_token);
+    info!("Auth token configured, encryption enabled");
 
     let (reader, writer) = client.into_split();
 
@@ -25,10 +27,10 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
     // Shared routing table: conn_id → sender to external connection
     let routing_table: RoutingTable = Arc::new(Mutex::new(HashMap::new()));
 
-    // Spawn write task: sends frames to the client
+    // Spawn write task: sends encrypted frames to the client
     task::spawn(async move {
         while let Some(frame) = rx_channel.recv().await {
-            let bytes = RfrpFrame::encode(&frame);
+            let bytes = RfrpFrame::encode_encrypted(&frame, &key);
             if let Err(e) = writer.send(Bytes::from(bytes)).await {
                 error!("Failed to send frame to client: {}", e);
                 break;
@@ -50,7 +52,7 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
             }
         };
 
-        let frame = match RfrpFrame::decode(&bytes) {
+        let frame = match RfrpFrame::decode_encrypted(&bytes, &key) {
             Ok(frame) => frame,
             Err(e) => {
                 error!("Failed to decode frame from client: {}", e);
