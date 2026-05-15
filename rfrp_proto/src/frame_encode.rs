@@ -1,5 +1,5 @@
 use crate::frame_types::RfrpFrame;
-use crate::crypto;
+use crate::crypto::Cipher;
 
 impl RfrpFrame {
     /// Serialize RfrpFrame to JSON bytes.
@@ -8,8 +8,8 @@ impl RfrpFrame {
     }
 
     /// Serialize RfrpFrame to JSON bytes, then encrypt with AES-256-GCM.
-    pub fn encode_encrypted(object: &RfrpFrame, key: &[u8; 32]) -> Vec<u8> {
+    pub fn encode_encrypted(object: &RfrpFrame, cipher: &Cipher) -> Vec<u8> {
         let plaintext = Self::encode(object);
-        crypto::encrypt(&plaintext, key)
+        cipher.encrypt(&plaintext)
     }
 }

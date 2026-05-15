@@ -1,5 +1,5 @@
 use rfrp_proto::frame_types::RfrpFrame;
-use rfrp_proto::crypto;
+use rfrp_proto::crypto::{self, Cipher};
 use tokio::net::TcpStream;
 use log::{debug, error, info, warn};
 use rfrp_config::config_info::base_types::{ClientInfo, ConfigInfo};
@@ -20,6 +20,7 @@ type InternalConnMap = Arc<Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>>;
 
 pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
     let key = crypto::derive_key(config.get_server().get_auth_token());
+    let cipher = Arc::new(Cipher::new(&key));
 
     let (reader, writer) = remote.into_split();
 
@@ -30,9 +31,10 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
     let (tx_to_server, mut rx_to_server) = mpsc::channel::<RfrpFrame>(128);
 
     // Spawn a task that writes encrypted frames to the server
+    let write_cipher = Arc::clone(&cipher);
     let write_task = task::spawn(async move {
         while let Some(frame) = rx_to_server.recv().await {
-            let bytes = RfrpFrame::encode_encrypted(&frame, &key);
+            let bytes = RfrpFrame::encode_encrypted(&frame, &write_cipher);
             if let Err(e) = writer.send(Bytes::from(bytes)).await {
                 error!("Failed to send frame to server: {}", e);
                 break;
@@ -54,7 +56,7 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
 
         // Wait for registration confirmation from server
         match reader.next().await {
-            Some(Ok(resp_bytes)) => match RfrpFrame::decode_encrypted(&resp_bytes, &key) {
+            Some(Ok(resp_bytes)) => match RfrpFrame::decode_encrypted(&resp_bytes, &cipher) {
                 Ok(RfrpFrame::RegisterAck(resp)) => {
                     if resp.success {
                         info!(
@@ -121,7 +123,7 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
             }
         };
 
-        let frame = match RfrpFrame::decode_encrypted(&bytes, &key) {
+        let frame = match RfrpFrame::decode_encrypted(&bytes, &cipher) {
             Ok(frame) => frame,
             Err(e) => {
                 error!("Failed to decode frame: {}", e);
@@ -132,22 +134,22 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
         match frame {
             RfrpFrame::Data(data_info) => {
                 let conn_id = data_info.conn_id;
+                let data = data_info.data;
                 let tx_to_server = tx_to_server.clone();
                 let conns = internal_conns.clone();
-                let client_info = data_info.client.clone();
 
                 // Get or create a connection to the internal service
                 let sender = get_or_create_internal_conn(
                     &conns,
                     conn_id,
-                    &client_info,
+                    &data_info.client,
                     tx_to_server,
                 )
                 .await;
 
                 match sender {
                     Some(sender) => {
-                        if let Err(e) = sender.send(data_info.data).await {
+                        if let Err(e) = sender.send(data).await {
                             error!(
                                 "Failed to forward data to internal service for conn {}: {}",
                                 conn_id, e
@@ -159,7 +161,7 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
                     None => {
                         error!(
                             "Could not establish connection to internal service {} for conn {}",
-                            client_info.get_addr(),
+                            data_info.client.get_addr(),
                             conn_id
                         );
                     }

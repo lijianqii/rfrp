@@ -7,7 +7,7 @@ use rfrp_proto::frame_types::RfrpFrame;
 use tokio::sync::mpsc;
 use futures::SinkExt;
 use rfrp_proto::frame_handle::{handle_reg_frame, RoutingTable};
-use rfrp_proto::crypto;
+use rfrp_proto::crypto::{self, Cipher};
 use bytes::Bytes;
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 
 pub async fn run_proxy(client: TcpStream, auth_token: String) {
     let key = crypto::derive_key(&auth_token);
+    let cipher = Arc::new(Cipher::new(&key));
     info!("Auth token configured, encryption enabled");
 
     let (reader, writer) = client.into_split();
@@ -31,9 +32,10 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
     let mut proxy_tasks: Vec<JoinHandle<()>> = Vec::new();
 
     // Spawn write task: sends encrypted frames to the client
+    let write_cipher = Arc::clone(&cipher);
     task::spawn(async move {
         while let Some(frame) = rx_channel.recv().await {
-            let bytes = RfrpFrame::encode_encrypted(&frame, &key);
+            let bytes = RfrpFrame::encode_encrypted(&frame, &write_cipher);
             if let Err(e) = writer.send(Bytes::from(bytes)).await {
                 error!("Failed to send frame to client: {}", e);
                 break;
@@ -55,7 +57,7 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
             }
         };
 
-        let frame = match RfrpFrame::decode_encrypted(&bytes, &key) {
+        let frame = match RfrpFrame::decode_encrypted(&bytes, &cipher) {
             Ok(frame) => frame,
             Err(e) => {
                 error!("Failed to decode frame from client: {}", e);
@@ -80,9 +82,12 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                 warn!("Unexpected RegisterAck frame received on server");
             }
             RfrpFrame::Data(data_info) => {
-                // Route response data from client back to the correct external connection
-                let routing = routing_table.lock().await;
-                match routing.get(&data_info.conn_id) {
+                // Clone sender outside the lock to avoid holding it across .await
+                let sender = {
+                    let routing = routing_table.lock().await;
+                    routing.get(&data_info.conn_id).cloned()
+                };
+                match sender {
                     Some(sender) => {
                         if let Err(e) = sender.send(data_info.data).await {
                             error!(

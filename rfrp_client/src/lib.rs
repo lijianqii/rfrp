@@ -17,17 +17,18 @@ pub async fn rfrp_client(config: ConfigInfo) {
     loop {
         attempt += 1;
 
+        let server_addr = config.get_server().get_addr();
         info!(
             "Connecting to server at {} (attempt {})...",
-            config.get_server().get_addr(),
+            server_addr,
             attempt
         );
 
-        let remote = match TcpStream::connect(config.get_server().get_addr()).await {
+        let remote = match TcpStream::connect(&server_addr).await {
             Ok(stream) => {
                 info!(
                     "Connected to server at {}",
-                    config.get_server().get_addr()
+                    server_addr
                 );
                 stream
             }

@@ -11,7 +11,7 @@ impl ConfigInfo {
             Err(e) => panic!("Failed to read config file: {}", e),
         };
 
-        debug!("Parsing config file: {}, read content: {:?}", config_path, content);
+        debug!("Parsing config file: {} ({} bytes)", config_path, content.len());
 
         let configs: ConfigInfo = match serde_json::from_str(&content) {
             Ok(config) => config,
@@ -138,7 +138,7 @@ impl ConfigInfo {
         debug!("  server_ip:    {}", self.get_server().get_ip());
         debug!("  server_port:  {}", self.get_server().get_port());
         debug!("  server_addr:  {}", self.get_server().get_addr());
-        debug!("  auth_token:   {}", self.get_server().get_auth_token());
+        debug!("  auth_token:   <redacted>");
         debug!("--- ClientProxy ({} entries) ---", self.get_client_proxy().len());
         for (i, client) in self.get_client_proxy().iter().enumerate() {
             debug!("  [{}] name:        {}", i, client.get_name());
