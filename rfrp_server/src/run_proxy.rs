@@ -1,6 +1,6 @@
 use log::{error, info, warn};
 use tokio::net::TcpStream;
-use tokio::task;
+use tokio::task::{self, JoinHandle};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tokio_stream::StreamExt;
 use rfrp_proto::frame_types::RfrpFrame;
@@ -26,6 +26,9 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
 
     // Shared routing table: conn_id → sender to external connection
     let routing_table: RoutingTable = Arc::new(Mutex::new(HashMap::new()));
+
+    // Track proxy listener tasks so we can abort them on disconnect
+    let mut proxy_tasks: Vec<JoinHandle<()>> = Vec::new();
 
     // Spawn write task: sends encrypted frames to the client
     task::spawn(async move {
@@ -65,9 +68,10 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                 info!("Client registered proxy: {:?}", client_info.get_name());
                 let routing = routing_table.clone();
                 let tx = tx_channel.clone();
-                task::spawn(async move {
+                let handle = task::spawn(async move {
                     handle_reg_frame(client_info, tx, routing).await;
                 });
+                proxy_tasks.push(handle);
             }
             RfrpFrame::Control(control_info) => {
                 info!("Control info: {:?}", control_info);
@@ -99,5 +103,9 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
         }
     }
 
+    // Abort all proxy listener tasks to release bound ports
+    for handle in proxy_tasks {
+        handle.abort();
+    }
     info!("Server proxy session ended");
 }
