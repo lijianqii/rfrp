@@ -1,12 +1,12 @@
-use log::{error, info};
+use log::{error, info, warn};
 use rfrp_config::config_info::base_types::ClientInfo;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::Sender;
-use tokio::task;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use std::sync::Arc;
-use std::collections::HashMap;
 use tokio::sync::{Mutex, mpsc};
+use tokio::task;
 
 use crate::frame_types::RfrpFrame;
 
@@ -17,7 +17,8 @@ pub async fn handle_reg_frame(
     tx_channel: Sender<RfrpFrame>,
     routing_table: RoutingTable,
 ) {
-    let listener = match TcpListener::bind(format!("0.0.0.0:{}", client_info.get_bind_port())).await {
+    let listener = match TcpListener::bind(format!("0.0.0.0:{}", client_info.get_bind_port())).await
+    {
         Ok(listener) => {
             info!(
                 "Proxy '{}' bound to port {}",
@@ -69,13 +70,18 @@ pub async fn handle_reg_frame(
             peer
         );
 
+        // Disable Nagle's algorithm for low-latency RDP forwarding
+        if let Err(e) = remote.set_nodelay(true) {
+            warn!("Failed to set TCP_NODELAY on external socket: {}", e);
+        }
+
         let (mut remote_read, mut remote_write) = remote.into_split();
         let client_info = client_info.clone();
         let tx_channel = tx_channel.clone();
         let routing = routing_table.clone();
 
         // Create a channel for writing data back to this external connection
-        let (tx_to_remote, mut rx_to_remote) = mpsc::channel::<Vec<u8>>(64);
+        let (tx_to_remote, mut rx_to_remote) = mpsc::channel::<Vec<u8>>(128);
 
         // Register this connection in the routing table
         routing.lock().await.insert(conn_id, tx_to_remote);
@@ -86,7 +92,8 @@ pub async fn handle_reg_frame(
         let cid = conn_id;
         let routing_cleanup = routing.clone();
         task::spawn(async move {
-            let mut buf = [0u8; 4096];
+            // 32KB buffer — RDP uses large frames, bigger buffer reduces syscalls
+            let mut buf = [0u8; 32768];
             loop {
                 match remote_read.read(&mut buf).await {
                     Ok(0) => {
@@ -122,7 +129,11 @@ pub async fn handle_reg_frame(
             }
             // Cleanup: remove from routing table on disconnect
             routing_cleanup.lock().await.remove(&cid);
-            info!("Proxy '{}' conn {}: cleaned up from routing table", ci.get_name(), cid);
+            info!(
+                "Proxy '{}' conn {}: cleaned up from routing table",
+                ci.get_name(),
+                cid
+            );
         });
 
         // Spawn write task: client → external user
@@ -140,11 +151,7 @@ pub async fn handle_reg_frame(
                     break;
                 }
             }
-            info!(
-                "Proxy '{}' conn {}: write task ended",
-                ci.get_name(),
-                cid
-            );
+            info!("Proxy '{}' conn {}: write task ended", ci.get_name(), cid);
         });
     }
 }

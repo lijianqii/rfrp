@@ -1,19 +1,24 @@
-use log::{error, info, warn};
-use tokio::net::TcpStream;
-use tokio::task::{self, JoinHandle};
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
-use tokio_stream::StreamExt;
-use rfrp_proto::frame_types::RfrpFrame;
-use tokio::sync::mpsc;
-use futures::SinkExt;
-use rfrp_proto::frame_handle::{handle_reg_frame, RoutingTable};
-use rfrp_proto::crypto::{self, Cipher};
 use bytes::Bytes;
-use std::sync::Arc;
+use futures::SinkExt;
+use log::{error, info, warn};
+use rfrp_proto::crypto::{self, Cipher};
+use rfrp_proto::frame_handle::{RoutingTable, handle_reg_frame};
+use rfrp_proto::frame_types::RfrpFrame;
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
+use tokio::task::{self, JoinHandle};
+use tokio_stream::StreamExt;
+use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 pub async fn run_proxy(client: TcpStream, auth_token: String) {
+    // Disable Nagle's algorithm for low-latency RDP forwarding
+    if let Err(e) = client.set_nodelay(true) {
+        warn!("Failed to set TCP_NODELAY on client socket: {}", e);
+    }
+
     let key = crypto::derive_key(&auth_token);
     let cipher = Arc::new(Cipher::new(&key));
     info!("Auth token configured, encryption enabled");

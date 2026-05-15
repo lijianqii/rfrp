@@ -1,24 +1,29 @@
-use rfrp_proto::frame_types::RfrpFrame;
-use rfrp_proto::crypto::{self, Cipher};
-use tokio::net::TcpStream;
-use log::{debug, error, info, warn};
-use rfrp_config::config_info::base_types::{ClientInfo, ConfigInfo};
-use rfrp_config::config_info::base_info_ops::BaseInfoGetter;
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use bytes::Bytes;
 use futures::SinkExt;
-use tokio_stream::StreamExt;
+use log::{debug, error, info, warn};
+use rfrp_config::config_info::base_info_ops::BaseInfoGetter;
+use rfrp_config::config_info::base_types::{ClientInfo, ConfigInfo};
+use rfrp_proto::crypto::{self, Cipher};
+use rfrp_proto::frame_types::RfrpFrame;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::task;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use std::sync::Arc;
-use std::collections::HashMap;
-use tokio::sync::Mutex;
+use tokio_stream::StreamExt;
+use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 /// Manages persistent connections to internal services, keyed by conn_id.
 type InternalConnMap = Arc<Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>>;
 
 pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
+    // Disable Nagle's algorithm for low-latency RDP forwarding
+    if let Err(e) = remote.set_nodelay(true) {
+        warn!("Failed to set TCP_NODELAY on server socket: {}", e);
+    }
+
     let key = crypto::derive_key(config.get_server().get_auth_token());
     let cipher = Arc::new(Cipher::new(&key));
 
@@ -27,8 +32,8 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
     let mut reader = FramedRead::new(reader, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(writer, LengthDelimitedCodec::new());
 
-    // Channel for serializing all writes to the server
-    let (tx_to_server, mut rx_to_server) = mpsc::channel::<RfrpFrame>(128);
+    // Channel for serializing all writes to the server — increased buffer for RDP throughput
+    let (tx_to_server, mut rx_to_server) = mpsc::channel::<RfrpFrame>(256);
 
     // Spawn a task that writes encrypted frames to the server
     let write_cipher = Arc::clone(&cipher);
@@ -139,13 +144,9 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
                 let conns = internal_conns.clone();
 
                 // Get or create a connection to the internal service
-                let sender = get_or_create_internal_conn(
-                    &conns,
-                    conn_id,
-                    &data_info.client,
-                    tx_to_server,
-                )
-                .await;
+                let sender =
+                    get_or_create_internal_conn(&conns, conn_id, &data_info.client, tx_to_server)
+                        .await;
 
                 match sender {
                     Some(sender) => {
@@ -213,7 +214,13 @@ async fn get_or_create_internal_conn(
     );
 
     let stream = match TcpStream::connect(&addr).await {
-        Ok(stream) => stream,
+        Ok(stream) => {
+            // Disable Nagle's algorithm for low-latency RDP forwarding
+            if let Err(e) = stream.set_nodelay(true) {
+                warn!("Failed to set TCP_NODELAY on internal socket: {}", e);
+            }
+            stream
+        }
         Err(e) => {
             error!(
                 "Failed to connect to internal service {} for conn {}: {}",
@@ -224,7 +231,7 @@ async fn get_or_create_internal_conn(
     };
 
     let (mut read_half, mut write_half) = stream.into_split();
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(128);
 
     // Insert into map
     {
@@ -245,10 +252,7 @@ async fn get_or_create_internal_conn(
                 break;
             }
         }
-        debug!(
-            "Write task for proxy '{}' conn {} ended",
-            ci_name, cid
-        );
+        debug!("Write task for proxy '{}' conn {} ended", ci_name, cid);
     });
 
     // Spawn read task: reads responses from internal service → sends back to server
@@ -256,7 +260,7 @@ async fn get_or_create_internal_conn(
     let cid = conn_id;
     let conns_cleanup = Arc::clone(conns);
     task::spawn(async move {
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; 32768];
         loop {
             match read_half.read(&mut buf).await {
                 Ok(0) => {
