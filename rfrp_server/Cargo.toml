@@ -8,6 +8,7 @@ authors.workspace = true
 [dependencies]
 tokio = { workspace = true }
 log = { workspace = true }
+serde_json = { workspace = true }
 rfrp_config = { path = "../rfrp_config" }
 rfrp_proto = { path = "../rfrp_proto" }
 tokio-util = { workspace = true }

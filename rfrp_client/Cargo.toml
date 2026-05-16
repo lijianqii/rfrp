@@ -12,5 +12,7 @@ tokio-util = { workspace = true }
 tokio-stream = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
 rfrp_config = { path = "../rfrp_config" }
 rfrp_proto = { path = "../rfrp_proto" }

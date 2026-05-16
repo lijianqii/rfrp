@@ -5,3 +5,4 @@ pub mod frame_handle;
 pub mod crypto;
 
 pub use frame_handle::RoutingTable;
+pub use frame_handle::P2pPeerTable;

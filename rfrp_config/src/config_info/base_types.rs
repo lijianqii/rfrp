@@ -8,6 +8,23 @@ pub enum RunningMode {
     Unknown,
 }
 
+/// Connection type for a proxy.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyConType {
+    Tcp,
+    P2p,
+}
+
+impl std::fmt::Display for ProxyConType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProxyConType::Tcp => write!(f, "tcp"),
+            ProxyConType::P2p => write!(f, "p2p"),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ControlInfo {
     pub command: String,
@@ -41,7 +58,13 @@ pub struct ClientInfo {
     bind_port: u16,
     proxy_ip: String,
     proxy_port: u16,
-    proxy_con_type: String,
+    proxy_con_type: ProxyConType,
+    /// P2P mode: the name of the peer client to connect to.
+    #[serde(default)]
+    pub p2p_peer_name: Option<String>,
+    /// P2P mode: STUN server address (e.g. "stun.l.google.com:19302").
+    #[serde(default)]
+    pub p2p_stun_server: Option<String>,
 }
 
 /// Server's response to a registration request.
@@ -49,6 +72,46 @@ pub struct ClientInfo {
 pub struct RegisterResponse {
     pub client: ClientInfo,
     pub success: bool,
+}
+
+// ========== P2P Signaling Types ==========
+
+/// Types of P2P signaling messages exchanged through the server.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum P2pSignalType {
+    /// Initiate a P2P connection, carries local UDP endpoint info.
+    Offer,
+    /// Respond to an Offer, carries own UDP endpoint info.
+    Answer,
+    /// NAT traversal candidate / additional address info.
+    Candidate,
+    /// Keep-alive ping.
+    Ping,
+    /// Keep-alive pong.
+    Pong,
+    /// Query whether a peer is online on this server.
+    PeerQuery,
+    /// Response to a PeerQuery: payload is JSON `{"found": true/false}`.
+    PeerResponse,
+}
+
+/// A P2P signaling frame, relayed by the server between two peers.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct P2pSignalInfo {
+    pub signal_type: P2pSignalType,
+    pub from_client: String,
+    pub to_client: String,
+    /// Serialized payload (e.g. SocketAddr string, or JSON with address info).
+    pub payload: Vec<u8>,
+}
+
+/// P2P direct data frame (used after hole punching, over UDP).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct P2pDataInfo {
+    pub conn_id: u64,
+    pub from_client: String,
+    pub to_client: String,
+    pub data: Vec<u8>,
 }
 
 impl ConfigInfo {
@@ -74,8 +137,20 @@ impl ClientInfo {
         &self.name
     }
 
-    pub fn get_proxy_con_type(&self) -> &str {
+    pub fn get_proxy_con_type(&self) -> &ProxyConType {
         &self.proxy_con_type
+    }
+
+    pub fn is_p2p(&self) -> bool {
+        self.proxy_con_type == ProxyConType::P2p
+    }
+
+    pub fn get_p2p_peer_name(&self) -> Option<&str> {
+        self.p2p_peer_name.as_deref()
+    }
+
+    pub fn get_p2p_stun_server(&self) -> Option<&str> {
+        self.p2p_stun_server.as_deref()
     }
 
 }

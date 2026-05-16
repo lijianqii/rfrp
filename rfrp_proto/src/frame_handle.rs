@@ -1,5 +1,6 @@
 use log::{error, info, warn};
 use rfrp_config::config_info::base_types::ClientInfo;
+use rfrp_config::config_info::base_types::ProxyConType;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -12,7 +13,30 @@ use crate::frame_types::RfrpFrame;
 
 pub type RoutingTable = Arc<Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>>;
 
+/// P2P peer table: maps client name → sender to that client's TCP tunnel.
+/// Used by the server to relay P2P signaling frames between peers.
+pub type P2pPeerTable = Arc<Mutex<HashMap<String, mpsc::Sender<RfrpFrame>>>>;
+
+/// Handle a registration frame from a client.
+/// For TCP proxies: bind the requested port and start accepting external connections.
+/// For P2P proxies: just acknowledge — P2P signaling handles the rest.
 pub async fn handle_reg_frame(
+    client_info: ClientInfo,
+    tx_channel: Sender<RfrpFrame>,
+    routing_table: RoutingTable,
+) {
+    match client_info.get_proxy_con_type() {
+        ProxyConType::Tcp => {
+            handle_tcp_reg_frame(client_info, tx_channel, routing_table).await;
+        }
+        ProxyConType::P2p => {
+            handle_p2p_reg_frame(client_info, tx_channel).await;
+        }
+    }
+}
+
+/// Handle registration for a TCP proxy: bind port, accept connections, forward data.
+async fn handle_tcp_reg_frame(
     client_info: ClientInfo,
     tx_channel: Sender<RfrpFrame>,
     routing_table: RoutingTable,
@@ -153,5 +177,24 @@ pub async fn handle_reg_frame(
             }
             info!("Proxy '{}' conn {}: write task ended", ci.get_name(), cid);
         });
+    }
+}
+
+/// Handle registration for a P2P proxy: just acknowledge.
+/// The client will later use P2P signaling frames for NAT traversal.
+async fn handle_p2p_reg_frame(
+    client_info: ClientInfo,
+    tx_channel: Sender<RfrpFrame>,
+) {
+    info!(
+        "P2P proxy '{}' registered (peer='{}'), no port binding needed",
+        client_info.get_name(),
+        client_info.get_p2p_peer_name().unwrap_or("???")
+    );
+
+    // Confirm registration to client
+    let confirm = RfrpFrame::new_reg_ack_frame(&client_info, true);
+    if tx_channel.send(confirm).await.is_err() {
+        error!("Failed to send P2P registration confirmation, channel closed");
     }
 }

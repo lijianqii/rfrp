@@ -1,4 +1,5 @@
 use super::config_info::base_types::ConfigInfo;
+use super::config_info::base_types::ProxyConType;
 use super::config_info::base_types::RunningMode;
 use super::config_info::base_info_ops::BaseInfoGetter;
 use log::{debug, warn};
@@ -76,30 +77,14 @@ impl ConfigInfo {
         let mut errors: Vec<String> = Vec::new();
 
         for (i, client) in clients.iter().enumerate() {
-            let ip = client.get_ip();
-            let port = client.get_port();
-
-            if ip.is_empty() {
-                errors.push(format!("client_proxy[{}]: proxy_ip is empty", i));
-                continue;
+            match client.get_proxy_con_type() {
+                ProxyConType::Tcp => {
+                    self.validate_tcp_client(i, client, &mut valid_count, &mut errors);
+                }
+                ProxyConType::P2p => {
+                    self.validate_p2p_client(i, client, &mut valid_count, &mut errors);
+                }
             }
-            if !Self::is_valid_ip(ip) {
-                errors.push(format!(
-                    "client_proxy[{}]: proxy_ip '{}' is not a valid IPv4/IPv6 address",
-                    i, ip
-                ));
-                continue;
-            }
-            if !Self::is_valid_port(port) {
-                errors.push(format!(
-                    "client_proxy[{}]: proxy_port {} is invalid (must be 1-65535)",
-                    i, port
-                ));
-                continue;
-            }
-
-            valid_count += 1;
-            debug!("client_proxy[{}] '{}' validation passed: {}:{}", i, client.get_name(), ip, port);
         }
 
         if valid_count == 0 {
@@ -115,6 +100,93 @@ impl ConfigInfo {
             clients.len()
         );
         Ok(())
+    }
+
+    fn validate_tcp_client(
+        &self,
+        i: usize,
+        client: &super::config_info::base_types::ClientInfo,
+        valid_count: &mut usize,
+        errors: &mut Vec<String>,
+    ) {
+        let ip = client.get_ip();
+        let port = client.get_port();
+
+        if ip.is_empty() {
+            errors.push(format!("client_proxy[{}]: proxy_ip is empty", i));
+            return;
+        }
+        if !Self::is_valid_ip(ip) {
+            errors.push(format!(
+                "client_proxy[{}]: proxy_ip '{}' is not a valid IPv4/IPv6 address",
+                i, ip
+            ));
+            return;
+        }
+        if !Self::is_valid_port(port) {
+            errors.push(format!(
+                "client_proxy[{}]: proxy_port {} is invalid (must be 1-65535)",
+                i, port
+            ));
+            return;
+        }
+
+        *valid_count += 1;
+        debug!("client_proxy[{}] (tcp) '{}' validation passed: {}:{}", i, client.get_name(), ip, port);
+    }
+
+    fn validate_p2p_client(
+        &self,
+        i: usize,
+        client: &super::config_info::base_types::ClientInfo,
+        valid_count: &mut usize,
+        errors: &mut Vec<String>,
+    ) {
+        // P2P mode: p2p_peer_name is optional.
+        // If set → actively query & connect to that peer.
+        // If not set → passive mode, wait for incoming Offers.
+
+        // proxy_ip/proxy_port represent the internal service address
+        let ip = client.get_ip();
+        let port = client.get_port();
+
+        if ip.is_empty() {
+            errors.push(format!("client_proxy[{}]: proxy_ip is empty", i));
+            return;
+        }
+        if !Self::is_valid_ip(ip) {
+            errors.push(format!(
+                "client_proxy[{}]: proxy_ip '{}' is not a valid IPv4/IPv6 address",
+                i, ip
+            ));
+            return;
+        }
+        if !Self::is_valid_port(port) {
+            errors.push(format!(
+                "client_proxy[{}]: proxy_port {} is invalid (must be 1-65535)",
+                i, port
+            ));
+            return;
+        }
+
+        // Optional: validate STUN server address if provided
+        if let Some(stun) = client.get_p2p_stun_server() {
+            if stun.is_empty() {
+                errors.push(format!(
+                    "client_proxy[{}]: p2p_stun_server is set but empty",
+                    i
+                ));
+                return;
+            }
+        }
+
+        *valid_count += 1;
+        debug!(
+            "client_proxy[{}] (p2p) '{}' validation passed, peer='{}'",
+            i,
+            client.get_name(),
+            client.get_p2p_peer_name().unwrap_or("???")
+        );
     }
 
     fn is_valid_ip(ip: &str) -> bool {
@@ -147,6 +219,10 @@ impl ConfigInfo {
             debug!("      proxy_port:   {}", client.get_port());
             debug!("      proxy_addr:   {}", client.get_addr());
             debug!("      proxy_con_type: {}", client.get_proxy_con_type());
+            if client.is_p2p() {
+                debug!("      p2p_peer_name:  {}", client.get_p2p_peer_name().unwrap_or("???"));
+                debug!("      p2p_stun_server: {:?}", client.get_p2p_stun_server());
+            }
         }
     }
 }
