@@ -17,6 +17,8 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 /// Manages persistent connections to internal services, keyed by conn_id.
 type InternalConnMap = Arc<Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>>;
+/// Maps proxy name → its per-proxy internal connection map.
+type ProxyInternalConnMap = Arc<Mutex<HashMap<String, InternalConnMap>>>;
 
 pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
     // Disable Nagle's algorithm for low-latency RDP forwarding
@@ -114,8 +116,8 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
 
     info!("All proxies registered, entering data forwarding loop");
 
-    // Map of conn_id → sender to internal service TCP connection
-    let internal_conns: InternalConnMap = Arc::new(Mutex::new(HashMap::new()));
+    // Per-proxy internal connection maps so conn_ids don't collide
+    let proxy_conns: ProxyInternalConnMap = Arc::new(Mutex::new(HashMap::new()));
 
     // Phase 2: Main loop — forward data between server and internal services
     loop {
@@ -144,7 +146,15 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
                 let conn_id = data_info.conn_id;
                 let data = data_info.data;
                 let tx_to_server = tx_to_server.clone();
-                let conns = internal_conns.clone();
+                let proxy_name = data_info.client.get_name().to_string();
+
+                // Get or create the per-proxy connection map
+                let conns = {
+                    let mut map = proxy_conns.lock().await;
+                    map.entry(proxy_name)
+                        .or_insert_with(|| Arc::new(Mutex::new(HashMap::new())))
+                        .clone()
+                };
 
                 // Get or create a connection to the internal service
                 let sender =
