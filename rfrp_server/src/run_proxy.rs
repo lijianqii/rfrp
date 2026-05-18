@@ -13,8 +13,10 @@ use tokio::task::{self, JoinHandle};
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
+/// Maps proxy name → its per-connection routing table.
+type ProxyRoutingMap = Arc<Mutex<HashMap<String, RoutingTable>>>;
+
 pub async fn run_proxy(client: TcpStream, auth_token: String) {
-    // Disable Nagle's algorithm for low-latency RDP forwarding
     if let Err(e) = client.set_nodelay(true) {
         warn!("Failed to set TCP_NODELAY on client socket: {}", e);
     }
@@ -30,8 +32,8 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
 
     let (tx_channel, mut rx_channel) = mpsc::channel::<RfrpFrame>(128);
 
-    // Shared routing table: conn_id → sender to external connection
-    let routing_table: RoutingTable = Arc::new(Mutex::new(HashMap::new()));
+    // Per-proxy routing tables so conn_ids don't collide across proxies
+    let proxy_routing: ProxyRoutingMap = Arc::new(Mutex::new(HashMap::new()));
 
     // Track proxy listener tasks so we can abort them on disconnect
     let mut proxy_tasks: Vec<JoinHandle<()>> = Vec::new();
@@ -73,7 +75,10 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
         match frame {
             RfrpFrame::Register(client_info) => {
                 info!("Client registered proxy: {:?}", client_info.get_name());
-                let routing = routing_table.clone();
+                let name = client_info.get_name().to_string();
+                // Each proxy gets its own routing table so conn_ids don't collide
+                let routing: RoutingTable = Arc::new(Mutex::new(HashMap::new()));
+                proxy_routing.lock().await.insert(name.clone(), Arc::clone(&routing));
                 let tx = tx_channel.clone();
                 let handle = task::spawn(async move {
                     handle_reg_frame(client_info, tx, routing).await;
@@ -87,10 +92,20 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                 warn!("Unexpected RegisterAck frame received on server");
             }
             RfrpFrame::Data(data_info) => {
-                // Clone sender outside the lock to avoid holding it across .await
-                let sender = {
-                    let routing = routing_table.lock().await;
-                    routing.get(&data_info.conn_id).cloned()
+                // Step 1: clone the proxy's routing table Arc out of the map
+                let routing: Option<RoutingTable> = {
+                    let routing_map = proxy_routing.lock().await;
+                    routing_map
+                        .get(data_info.client.get_name())
+                        .cloned()
+                };
+                // Step 2: look up conn_id in the proxy's own routing table
+                let sender = match routing {
+                    Some(rt) => {
+                        let table = rt.lock().await;
+                        table.get(&data_info.conn_id).cloned()
+                    }
+                    None => None,
                 };
                 match sender {
                     Some(sender) => {
@@ -117,5 +132,7 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
     for handle in proxy_tasks {
         handle.abort();
     }
+    // Clean up routing table entries
+    proxy_routing.lock().await.clear();
     info!("Server proxy session ended");
 }
