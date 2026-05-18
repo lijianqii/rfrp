@@ -74,6 +74,7 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
                             "Server rejected registration for proxy '{}'",
                             client_info.get_name()
                         );
+                        return;
                     }
                 }
                 Ok(other) => {
@@ -195,7 +196,7 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
 async fn get_or_create_internal_conn(
     conns: &InternalConnMap,
     conn_id: u64,
-    client_info: &ClientInfo,
+    client_info: &Arc<ClientInfo>,
     tx_to_server: mpsc::Sender<RfrpFrame>,
 ) -> Option<mpsc::Sender<Vec<u8>>> {
     // Fast path: connection already exists
@@ -233,9 +234,12 @@ async fn get_or_create_internal_conn(
     let (mut read_half, mut write_half) = stream.into_split();
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(128);
 
-    // Insert into map
+    // Re-check under lock: another task may have beaten us here
     {
         let mut map = conns.lock().await;
+        if let Some(existing) = map.get(&conn_id) {
+            return Some(existing.clone());
+        }
         map.insert(conn_id, tx.clone());
     }
 
@@ -256,7 +260,7 @@ async fn get_or_create_internal_conn(
     });
 
     // Spawn read task: reads responses from internal service → sends back to server
-    let ci = client_info.clone();
+    let ci = Arc::clone(client_info);
     let cid = conn_id;
     let conns_cleanup = Arc::clone(conns);
     task::spawn(async move {

@@ -4,6 +4,7 @@ use rfrp_config::config_info::base_types::DataInfo;
 use rfrp_config::config_info::base_types::RegisterResponse;
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RfrpFrame {
@@ -14,11 +15,11 @@ pub enum RfrpFrame {
 }
 
 impl RfrpFrame {
-    pub fn new_data_frame(data: &[u8], client_info: &ClientInfo, conn_id: u64) -> Self {
+    pub fn new_data_frame(data: &[u8], client_info: &Arc<ClientInfo>, conn_id: u64) -> Self {
         RfrpFrame::Data(DataInfo {
             conn_id,
             data: data.to_vec(),
-            client: client_info.clone(),
+            client: Arc::clone(client_info),
         })
     }
 

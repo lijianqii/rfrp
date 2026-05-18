@@ -31,9 +31,7 @@ pub async fn rfrp_server(config: ConfigInfo) {
             warn!("Failed to set TCP_NODELAY on accepted socket: {}", e);
         }
 
-        let mut auth_token = String::new();
-
-        auth_token.push_str(config.get_server().get_auth_token());
+        let auth_token = config.get_server().get_auth_token().to_string();
 
         tokio::task::spawn(run_proxy(socket, auth_token));
     }

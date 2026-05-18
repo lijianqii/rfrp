@@ -17,6 +17,7 @@ pub async fn handle_reg_frame(
     tx_channel: Sender<RfrpFrame>,
     routing_table: RoutingTable,
 ) {
+    let client_info = Arc::new(client_info);
     let listener = match TcpListener::bind(format!("0.0.0.0:{}", client_info.get_bind_port())).await
     {
         Ok(listener) => {
@@ -76,7 +77,6 @@ pub async fn handle_reg_frame(
         }
 
         let (mut remote_read, mut remote_write) = remote.into_split();
-        let client_info = client_info.clone();
         let tx_channel = tx_channel.clone();
         let routing = routing_table.clone();
 
@@ -88,7 +88,7 @@ pub async fn handle_reg_frame(
 
         // Spawn read task: external user → client
         let tx = tx_channel.clone();
-        let ci = client_info.clone();
+        let ci = Arc::clone(&client_info);
         let cid = conn_id;
         let routing_cleanup = routing.clone();
         task::spawn(async move {
@@ -137,7 +137,7 @@ pub async fn handle_reg_frame(
         });
 
         // Spawn write task: client → external user
-        let ci = client_info.clone();
+        let ci = Arc::clone(&client_info);
         let cid = conn_id;
         task::spawn(async move {
             while let Some(data) = rx_to_remote.recv().await {

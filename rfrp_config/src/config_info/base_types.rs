@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use crate::config_info::base_info_ops::BaseInfoGetter;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -17,7 +18,7 @@ pub struct ControlInfo {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DataInfo {
     pub conn_id: u64,
-    pub client: ClientInfo,
+    pub client: Arc<ClientInfo>,
     pub data: Vec<u8>,
 }
 
@@ -60,7 +61,7 @@ impl ConfigInfo {
         &self.server
     }
 
-    pub fn get_client_proxy(&self) -> &Vec<ClientInfo> {
+    pub fn get_client_proxy(&self) -> &[ClientInfo] {
         &self.client_proxy
     }
 }
