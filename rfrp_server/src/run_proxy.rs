@@ -30,7 +30,7 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
     let mut reader = FramedRead::new(reader, LengthDelimitedCodec::new());
     let mut writer = FramedWrite::new(writer, LengthDelimitedCodec::new());
 
-    let (tx_channel, mut rx_channel) = mpsc::channel::<RfrpFrame>(128);
+    let (tx_channel, mut rx_channel) = mpsc::channel::<RfrpFrame>(256);
 
     // Per-proxy routing tables so conn_ids don't collide across proxies
     let proxy_routing: ProxyRoutingMap = Arc::new(Mutex::new(HashMap::new()));

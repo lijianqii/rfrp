@@ -14,3 +14,4 @@ aes-gcm = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
 rmp-serde = { workspace = true }
+bytes = { workspace = true }

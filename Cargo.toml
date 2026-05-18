@@ -16,7 +16,7 @@ serde = { version = "1.0.228", features = ["derive", "rc"] }
 tokio-util = { version = "0.7.17", features = ["full"] }
 tokio-stream = { version = "0.1.17", features = ["full"] }
 futures = { version = "0.3.32" }
-bytes = { version = "1" }
+bytes = { version = "1", features = ["serde"] }
 aes-gcm = "0.10"
 sha2 = "0.10"
 rand = "0.8"

@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use bytes::BytesMut;
 use futures::SinkExt;
 use log::{debug, error, info, warn};
 use rfrp_config::config_info::base_info_ops::BaseInfoGetter;
@@ -16,7 +17,8 @@ use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 /// Manages persistent connections to internal services, keyed by conn_id.
-type InternalConnMap = Arc<Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>>;
+type InternalConnSender = mpsc::Sender<Bytes>;
+type InternalConnMap = Arc<Mutex<HashMap<u64, InternalConnSender>>>;
 /// Maps proxy name → its per-proxy internal connection map.
 type ProxyInternalConnMap = Arc<Mutex<HashMap<String, InternalConnMap>>>;
 
@@ -210,7 +212,7 @@ async fn get_or_create_internal_conn(
     conn_id: u64,
     client_info: &Arc<ClientInfo>,
     tx_to_server: mpsc::Sender<RfrpFrame>,
-) -> Option<mpsc::Sender<Vec<u8>>> {
+) -> Option<mpsc::Sender<Bytes>> {
     // Fast path: connection already exists
     {
         let map = conns.lock().await;
@@ -244,7 +246,7 @@ async fn get_or_create_internal_conn(
     };
 
     let (mut read_half, mut write_half) = stream.into_split();
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(128);
+    let (tx, mut rx) = mpsc::channel::<Bytes>(256);
 
     // Re-check under lock: another task may have beaten us here
     {
@@ -276,9 +278,9 @@ async fn get_or_create_internal_conn(
     let cid = conn_id;
     let conns_cleanup = Arc::clone(conns);
     task::spawn(async move {
-        let mut buf = [0u8; 32768];
+        let mut buf = BytesMut::with_capacity(32768);
         loop {
-            match read_half.read(&mut buf).await {
+            match read_half.read_buf(&mut buf).await {
                 Ok(0) => {
                     info!(
                         "Internal service for proxy '{}' conn {} closed connection",
@@ -287,8 +289,9 @@ async fn get_or_create_internal_conn(
                     );
                     break;
                 }
-                Ok(n) => {
-                    let frame = RfrpFrame::new_data_frame(&buf[..n], &ci, cid);
+                Ok(_) => {
+                    let data = buf.split().freeze();
+                    let frame = RfrpFrame::new_data_frame(data, &ci, cid);
                     if tx_to_server.send(frame).await.is_err() {
                         error!(
                             "Failed to send response to server for proxy '{}' conn {}",

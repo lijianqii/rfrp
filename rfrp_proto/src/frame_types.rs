@@ -3,6 +3,7 @@ use rfrp_config::config_info::base_types::ControlInfo;
 use rfrp_config::config_info::base_types::DataInfo;
 use rfrp_config::config_info::base_types::RegisterResponse;
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -15,10 +16,10 @@ pub enum RfrpFrame {
 }
 
 impl RfrpFrame {
-    pub fn new_data_frame(data: &[u8], client_info: &Arc<ClientInfo>, conn_id: u64) -> Self {
+    pub fn new_data_frame(data: Bytes, client_info: &Arc<ClientInfo>, conn_id: u64) -> Self {
         RfrpFrame::Data(DataInfo {
             conn_id,
-            data: data.to_vec(),
+            data,
             client: Arc::clone(client_info),
         })
     }

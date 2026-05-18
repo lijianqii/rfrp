@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use bytes::Bytes;
 use crate::config_info::base_info_ops::BaseInfoGetter;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -19,7 +20,7 @@ pub struct ControlInfo {
 pub struct DataInfo {
     pub conn_id: u64,
     pub client: Arc<ClientInfo>,
-    pub data: Vec<u8>,
+    pub data: Bytes,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

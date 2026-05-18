@@ -1,5 +1,6 @@
 use log::{error, info, warn};
 use rfrp_config::config_info::base_types::ClientInfo;
+use bytes::{Bytes, BytesMut};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -10,7 +11,8 @@ use tokio::task;
 
 use crate::frame_types::RfrpFrame;
 
-pub type RoutingTable = Arc<Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>>;
+type ConnSender = mpsc::Sender<Bytes>;
+pub type RoutingTable = Arc<Mutex<HashMap<u64, ConnSender>>>;
 
 pub async fn handle_reg_frame(
     client_info: ClientInfo,
@@ -84,7 +86,7 @@ pub async fn handle_reg_frame(
         let routing = routing_table.clone();
 
         // Create a channel for writing data back to this external connection
-        let (tx_to_remote, mut rx_to_remote) = mpsc::channel::<Vec<u8>>(128);
+        let (tx_to_remote, mut rx_to_remote) = mpsc::channel::<Bytes>(256);
 
         // Register this connection in the routing table
         routing.lock().await.insert(conn_id, tx_to_remote);
@@ -95,10 +97,9 @@ pub async fn handle_reg_frame(
         let cid = conn_id;
         let routing_cleanup = routing.clone();
         task::spawn(async move {
-            // 32KB buffer — RDP uses large frames, bigger buffer reduces syscalls
-            let mut buf = [0u8; 32768];
+            let mut buf = BytesMut::with_capacity(32768);
             loop {
-                match remote_read.read(&mut buf).await {
+                match remote_read.read_buf(&mut buf).await {
                     Ok(0) => {
                         info!(
                             "Proxy '{}' conn {}: external peer {} closed connection",
@@ -108,8 +109,9 @@ pub async fn handle_reg_frame(
                         );
                         break;
                     }
-                    Ok(n) => {
-                        let frame = RfrpFrame::new_data_frame(&buf[..n], &ci, cid);
+                    Ok(_) => {
+                        let data = buf.split().freeze();
+                        let frame = RfrpFrame::new_data_frame(data, &ci, cid);
                         if tx.send(frame).await.is_err() {
                             error!(
                                 "Proxy '{}' conn {}: failed to send data frame to client, channel closed",
