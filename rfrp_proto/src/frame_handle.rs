@@ -35,6 +35,9 @@ pub async fn handle_reg_frame(
                 client_info.get_bind_port(),
                 e
             );
+            // Notify client that registration failed
+            let reject = RfrpFrame::new_reg_ack_frame(&client_info, false);
+            let _ = tx_channel.send(reject).await;
             return;
         }
     };

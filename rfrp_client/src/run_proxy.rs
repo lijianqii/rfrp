@@ -83,6 +83,7 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
                         client_info.get_name(),
                         other
                     );
+                    return;
                 }
                 Err(e) => {
                     error!(
@@ -90,6 +91,7 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
                         client_info.get_name(),
                         e
                     );
+                    return;
                 }
             },
             Some(Err(e)) => {
