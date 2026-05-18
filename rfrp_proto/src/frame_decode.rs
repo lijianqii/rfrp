@@ -2,9 +2,9 @@ use crate::frame_types::RfrpFrame;
 use crate::crypto::Cipher;
 
 impl RfrpFrame {
-    /// Deserialize RfrpFrame from JSON bytes.
+    /// Deserialize RfrpFrame from MessagePack bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        serde_json::from_slice(bytes)
+        rmp_serde::from_slice(bytes)
             .map_err(|e| format!("Failed to decode frame: {}", e))
     }
 

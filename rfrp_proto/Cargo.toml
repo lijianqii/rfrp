@@ -6,7 +6,6 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-serde_json = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 log = { workspace = true }
@@ -14,3 +13,4 @@ rfrp_config = { path = "../rfrp_config" }
 aes-gcm = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
+rmp-serde = { workspace = true }

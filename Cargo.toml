@@ -20,3 +20,4 @@ bytes = { version = "1" }
 aes-gcm = "0.10"
 sha2 = "0.10"
 rand = "0.8"
+rmp-serde = "1"
