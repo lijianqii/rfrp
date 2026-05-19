@@ -44,6 +44,8 @@ pub struct ClientInfo {
     proxy_ip: String,
     proxy_port: u16,
     proxy_con_type: String,
+    #[serde(default)]
+    p2p_stun_server: Option<String>,
 }
 
 /// Server's response to a registration request.
@@ -51,6 +53,36 @@ pub struct ClientInfo {
 pub struct RegisterResponse {
     pub client: ClientInfo,
     pub success: bool,
+}
+
+/// P2P signaling message type.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum P2pSignalType {
+    PeerQuery,
+    PeerFound,
+    Offer,
+    Answer,
+    Candidate,
+    Ping,
+    Pong,
+}
+
+/// P2P signaling frame payload.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct P2pSignalInfo {
+    pub signal_type: P2pSignalType,
+    pub from_client: String,
+    pub to_client: String,
+    pub payload: Vec<u8>,
+}
+
+/// P2P direct data frame (sent over UDX, not through server).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct P2pDataInfo {
+    pub conn_id: u64,
+    pub from_client: String,
+    pub to_client: String,
+    pub data: Vec<u8>,
 }
 
 impl ConfigInfo {
@@ -78,6 +110,10 @@ impl ClientInfo {
 
     pub fn get_proxy_con_type(&self) -> &str {
         &self.proxy_con_type
+    }
+
+    pub fn get_p2p_stun_server(&self) -> Option<&str> {
+        self.p2p_stun_server.as_deref()
     }
 
 }

@@ -13,10 +13,12 @@ use tokio::task::{self, JoinHandle};
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
+use crate::PeerTable;
+
 /// Maps proxy name → its per-connection routing table.
 type ProxyRoutingMap = Arc<Mutex<HashMap<String, RoutingTable>>>;
 
-pub async fn run_proxy(client: TcpStream, auth_token: String) {
+pub async fn run_proxy(client: TcpStream, auth_token: String, peer_table: PeerTable) {
     if let Err(e) = client.set_nodelay(true) {
         warn!("Failed to set TCP_NODELAY on client socket: {}", e);
     }
@@ -37,6 +39,8 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
 
     // Track proxy listener tasks so we can abort them on disconnect
     let mut proxy_tasks: Vec<JoinHandle<()>> = Vec::new();
+    // Track registered names for peer table cleanup
+    let mut registered_names: Vec<String> = Vec::new();
 
     // Spawn write task: sends encrypted frames to the client
     let write_cipher = Arc::clone(&cipher);
@@ -76,6 +80,9 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
             RfrpFrame::Register(client_info) => {
                 info!("Client registered proxy: {:?}", client_info.get_name());
                 let name = client_info.get_name().to_string();
+                // Register this client in the P2P peer table
+                peer_table.lock().await.insert(name.clone(), tx_channel.clone());
+                registered_names.push(name.clone());
                 // Each proxy gets its own routing table so conn_ids don't collide
                 let routing: RoutingTable = Arc::new(Mutex::new(HashMap::new()));
                 proxy_routing.lock().await.insert(name.clone(), Arc::clone(&routing));
@@ -124,6 +131,30 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                         );
                     }
                 }
+            }
+            RfrpFrame::P2pSignal(signal) => {
+                info!(
+                    "P2P signal {:?} from '{}' to '{}'",
+                    signal.signal_type, signal.from_client, signal.to_client
+                );
+                let target_tx = {
+                    let pt = peer_table.lock().await;
+                    pt.get(&signal.to_client).cloned()
+                };
+                match target_tx {
+                    Some(tx) => {
+                        let name = signal.to_client.clone();
+                        if tx.send(RfrpFrame::P2pSignal(signal)).await.is_err() {
+                            warn!("P2P: failed to relay signal to '{}'", name);
+                        }
+                    }
+                    None => {
+                        warn!("P2P: target peer '{}' not found", signal.to_client);
+                    }
+                }
+            }
+            RfrpFrame::P2pData(_) => {
+                warn!("Unexpected P2pData frame on server (should be direct)");
             }
         }
     }

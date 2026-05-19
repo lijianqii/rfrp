@@ -3,24 +3,32 @@
 
     "server": {
         "server_ip": "127.0.0.1",
-        "server_port": 11000,
-        "auth_token": "lijianqii@outlook.com"
+        "server_port": 55000,
+        "auth_token": "your-secret-token"
     },
 
     "client_proxy": [
         {
             "name": "example1",
-            "bind_port": 22001,
+            "bind_port": 55001,
             "proxy_ip": "192.168.1.79",
             "proxy_port": 22,
             "proxy_con_type": "tcp"
         },
         {
             "name": "example2",
-            "bind_port": 22002,
+            "bind_port": 55002,
             "proxy_ip": "192.168.1.91",
             "proxy_port": 22,
             "proxy_con_type": "tcp"
+        },
+        {
+            "name": "peer-a",
+            "bind_port": 55003,
+            "proxy_ip": "192.168.1.240",
+            "proxy_port": 3389,
+            "proxy_con_type": "p2p",
+            "p2p_stun_server": "stun.l.google.com:19302"
         }
     ]
 }

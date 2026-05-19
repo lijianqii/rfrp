@@ -20,6 +20,18 @@ pub async fn handle_reg_frame(
     routing_table: RoutingTable,
 ) {
     let client_info = Arc::new(client_info);
+
+    // P2P proxies don't need a TCP listener — just confirm registration
+    if client_info.get_proxy_con_type() == "p2p" {
+        info!(
+            "P2P proxy '{}' registered (no port bind)",
+            client_info.get_name()
+        );
+        let confirm = RfrpFrame::new_reg_ack_frame(&client_info, true);
+        let _ = tx_channel.send(confirm).await;
+        return;
+    }
+
     let listener = match TcpListener::bind(format!("0.0.0.0:{}", client_info.get_bind_port())).await
     {
         Ok(listener) => {

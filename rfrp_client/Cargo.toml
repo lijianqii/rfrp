@@ -14,3 +14,4 @@ futures = { workspace = true }
 bytes = { workspace = true }
 rfrp_config = { path = "../rfrp_config" }
 rfrp_proto = { path = "../rfrp_proto" }
+libudx = { workspace = true }

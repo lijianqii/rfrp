@@ -1,4 +1,5 @@
 mod run_proxy;
+mod p2p;
 
 use log::{info, warn};
 use rfrp_config::config_info::{base_info_ops::BaseInfoGetter, base_types::ConfigInfo};

@@ -3,9 +3,10 @@ use bytes::BytesMut;
 use futures::SinkExt;
 use log::{debug, error, info, warn};
 use rfrp_config::config_info::base_info_ops::BaseInfoGetter;
-use rfrp_config::config_info::base_types::{ClientInfo, ConfigInfo};
+use rfrp_config::config_info::base_types::{ClientInfo, ConfigInfo, P2pSignalType};
 use rfrp_proto::crypto::{self, Cipher};
 use rfrp_proto::frame_types::RfrpFrame;
+use crate::p2p;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -118,6 +119,31 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
 
     info!("All proxies registered, entering data forwarding loop");
 
+    // Spawn P2P connection tasks for p2p-type proxies
+    let query_waiters = p2p::PeerQueryWaiters::default();
+    let answer_waiters = p2p::AnswerWaiters::default();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let _shutdown_tx = shutdown_tx; // held to keep channel alive
+    for client_info in config.get_client_proxy() {
+        if client_info.get_proxy_con_type() == "p2p" {
+            let peer_name = client_info.get_ip().to_string();
+            let my_name = client_info.get_name().to_string();
+            let bind_port = client_info.get_bind_port();
+            let stun = client_info.get_p2p_stun_server().map(|s| s.to_string());
+            info!(
+                "P2P: spawning query task '{}' → '{}' (bind_port {})",
+                my_name, peer_name, bind_port
+            );
+            task::spawn(p2p::query_and_connect(
+                my_name, peer_name, bind_port, stun,
+                Arc::clone(&cipher),
+                tx_to_server.clone(),
+                query_waiters.clone(), answer_waiters.clone(),
+                shutdown_rx.clone(),
+            ));
+        }
+    }
+
     // Per-proxy internal connection maps so conn_ids don't collide
     let proxy_conns: ProxyInternalConnMap = Arc::new(Mutex::new(HashMap::new()));
 
@@ -197,6 +223,66 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
                     "Unexpected register ack for proxy '{}' in main loop",
                     resp.client.get_name()
                 );
+            }
+            RfrpFrame::P2pSignal(signal) => {
+                debug!(
+                    "P2P signal {:?} from '{}'",
+                    signal.signal_type, signal.from_client
+                );
+                match signal.signal_type {
+                    P2pSignalType::PeerQuery => {
+                        // Another peer is looking for us — respond with PeerFound
+                        let reply = RfrpFrame::new_p2p_signal(
+                            P2pSignalType::PeerFound,
+                            &signal.to_client,     // from us
+                            &signal.from_client,   // to them
+                            signal.payload,         // echo payload
+                        );
+                        let _ = tx_to_server.send(reply).await;
+                    }
+                    P2pSignalType::PeerFound => {
+                        // Server relayed a PeerFound to us — wake our query waiter
+                        let mut w = query_waiters.lock().await;
+                        if let Some(tx) = w.remove(&signal.from_client) {
+                            let _ = tx.send(true);
+                        }
+                    }
+                    P2pSignalType::Offer => {
+                        let bind_port = {
+                            config.get_client_proxy().iter()
+                                .find(|c| c.get_name() == signal.to_client)
+                                .map(|c| c.get_bind_port())
+                                .unwrap_or(0)
+                        };
+                        let stun = config.get_client_proxy().iter()
+                            .find(|c| c.get_name() == signal.to_client)
+                            .and_then(|c| c.get_p2p_stun_server())
+                            .map(|s| s.to_string());
+                        if bind_port > 0 {
+                            let sig = signal.clone();
+                            task::spawn(p2p::handle_incoming_p2p_offer(
+                                sig, bind_port, stun,
+                                Arc::clone(&cipher),
+                                tx_to_server.clone(), shutdown_rx.clone(),
+                            ));
+                        }
+                    }
+                    P2pSignalType::Answer => {
+                        let mut w = answer_waiters.lock().await;
+                        let addr_str = String::from_utf8_lossy(&signal.payload);
+                        if let Ok(addr) = addr_str.parse() {
+                            if let Some(tx) = w.remove(&signal.from_client) {
+                                let _ = tx.send(addr);
+                            }
+                        }
+                    }
+                    _ => {
+                        debug!("P2P: unhandled signal {:?}", signal.signal_type);
+                    }
+                }
+            }
+            RfrpFrame::P2pData(_) => {
+                warn!("Unexpected P2pData frame (should be direct)");
             }
         }
     }

@@ -1,6 +1,9 @@
 use rfrp_config::config_info::base_types::ClientInfo;
 use rfrp_config::config_info::base_types::ControlInfo;
 use rfrp_config::config_info::base_types::DataInfo;
+use rfrp_config::config_info::base_types::P2pDataInfo;
+use rfrp_config::config_info::base_types::P2pSignalInfo;
+use rfrp_config::config_info::base_types::P2pSignalType;
 use rfrp_config::config_info::base_types::RegisterResponse;
 
 use bytes::Bytes;
@@ -13,6 +16,10 @@ pub enum RfrpFrame {
     RegisterAck(RegisterResponse),
     Control(ControlInfo),
     Data(DataInfo),
+    /// P2P signaling frame: relayed by server between peers for NAT traversal.
+    P2pSignal(P2pSignalInfo),
+    /// P2P direct data frame: sent over UDX after hole punching.
+    P2pData(P2pDataInfo),
 }
 
 impl RfrpFrame {
@@ -28,6 +35,20 @@ impl RfrpFrame {
         RfrpFrame::RegisterAck(RegisterResponse {
             client: client_info.clone(),
             success,
+        })
+    }
+
+    pub fn new_p2p_signal(
+        signal_type: P2pSignalType,
+        from_client: &str,
+        to_client: &str,
+        payload: Vec<u8>,
+    ) -> Self {
+        RfrpFrame::P2pSignal(P2pSignalInfo {
+            signal_type,
+            from_client: from_client.to_string(),
+            to_client: to_client.to_string(),
+            payload,
         })
     }
 }
