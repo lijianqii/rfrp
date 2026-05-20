@@ -1,15 +1,16 @@
+use bytes::{Bytes, BytesMut};
 use log::{error, info, warn};
 use rfrp_config::config_info::base_types::ClientInfo;
-use bytes::{Bytes, BytesMut};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task;
 
 use crate::frame_types::RfrpFrame;
+
+use tokio::sync::mpsc::Sender;
 
 type ConnSender = mpsc::Sender<Bytes>;
 pub type RoutingTable = Arc<Mutex<HashMap<u64, ConnSender>>>;
@@ -97,7 +98,7 @@ pub async fn handle_reg_frame(
         let cid = conn_id;
         let routing_cleanup = routing.clone();
         task::spawn(async move {
-            let mut buf = BytesMut::with_capacity(32768);
+            let mut buf = BytesMut::with_capacity(65536);
             loop {
                 match remote_read.read_buf(&mut buf).await {
                     Ok(0) => {
@@ -111,7 +112,7 @@ pub async fn handle_reg_frame(
                     }
                     Ok(_) => {
                         let data = buf.split().freeze();
-                        let frame = RfrpFrame::new_data_frame(data, &ci, cid);
+                        let frame = RfrpFrame::new_data_frame(data, ci.get_name(), cid);
                         if tx.send(frame).await.is_err() {
                             error!(
                                 "Proxy '{}' conn {}: failed to send data frame to client, channel closed",

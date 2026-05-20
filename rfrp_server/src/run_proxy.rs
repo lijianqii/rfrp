@@ -1,6 +1,5 @@
-use bytes::Bytes;
-use futures::SinkExt;
 use log::{error, info, warn};
+use rfrp_proto::coalesce;
 use rfrp_proto::crypto::{self, Cipher};
 use rfrp_proto::frame_handle::{RoutingTable, handle_reg_frame};
 use rfrp_proto::frame_types::RfrpFrame;
@@ -8,7 +7,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc;
 use tokio::task::{self, JoinHandle};
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -28,27 +26,20 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
     let (reader, writer) = client.into_split();
 
     let mut reader = FramedRead::new(reader, LengthDelimitedCodec::new());
-    let mut writer = FramedWrite::new(writer, LengthDelimitedCodec::new());
 
-    let (tx_channel, mut rx_channel) = mpsc::channel::<RfrpFrame>(256);
+    // Priority-based coalescing write task:
+    // - Hi-priority: small frames (input events) sent immediately
+    // - Lo-priority: large frames (screen data) buffered & coalesced
+    let (tx_channel, _write_handle) = coalesce::spawn_write_task(
+        FramedWrite::new(writer, LengthDelimitedCodec::new()),
+        Arc::clone(&cipher),
+    );
 
     // Per-proxy routing tables so conn_ids don't collide across proxies
     let proxy_routing: ProxyRoutingMap = Arc::new(Mutex::new(HashMap::new()));
 
     // Track proxy listener tasks so we can abort them on disconnect
     let mut proxy_tasks: Vec<JoinHandle<()>> = Vec::new();
-
-    // Spawn write task: sends encrypted frames to the client
-    let write_cipher = Arc::clone(&cipher);
-    task::spawn(async move {
-        while let Some(frame) = rx_channel.recv().await {
-            let bytes = RfrpFrame::encode_encrypted(&frame, &write_cipher);
-            if let Err(e) = writer.send(Bytes::from(bytes)).await {
-                error!("Failed to send frame to client: {}", e);
-                break;
-            }
-        }
-    });
 
     // Main read loop: receive frames from the client
     loop {
@@ -78,7 +69,10 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                 let name = client_info.get_name().to_string();
                 // Each proxy gets its own routing table so conn_ids don't collide
                 let routing: RoutingTable = Arc::new(Mutex::new(HashMap::new()));
-                proxy_routing.lock().await.insert(name.clone(), Arc::clone(&routing));
+                proxy_routing
+                    .lock()
+                    .await
+                    .insert(name.clone(), Arc::clone(&routing));
                 let tx = tx_channel.clone();
                 let handle = task::spawn(async move {
                     handle_reg_frame(client_info, tx, routing).await;
@@ -95,9 +89,7 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                 // Step 1: clone the proxy's routing table Arc out of the map
                 let routing: Option<RoutingTable> = {
                     let routing_map = proxy_routing.lock().await;
-                    routing_map
-                        .get(data_info.client.get_name())
-                        .cloned()
+                    routing_map.get(&data_info.proxy_name).cloned()
                 };
                 // Step 2: look up conn_id in the proxy's own routing table
                 let sender = match routing {
@@ -119,8 +111,7 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                     None => {
                         error!(
                             "No route found for conn {} (proxy '{}'), connection may have been closed",
-                            data_info.conn_id,
-                            data_info.client.get_name()
+                            data_info.conn_id, data_info.proxy_name
                         );
                     }
                 }

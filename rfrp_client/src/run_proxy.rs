@@ -1,9 +1,9 @@
 use bytes::Bytes;
 use bytes::BytesMut;
-use futures::SinkExt;
 use log::{debug, error, info, warn};
 use rfrp_config::config_info::base_info_ops::BaseInfoGetter;
 use rfrp_config::config_info::base_types::{ClientInfo, ConfigInfo};
+use rfrp_proto::coalesce::{self};
 use rfrp_proto::crypto::{self, Cipher};
 use rfrp_proto::frame_types::RfrpFrame;
 use std::collections::HashMap;
@@ -34,23 +34,14 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
     let (reader, writer) = remote.into_split();
 
     let mut reader = FramedRead::new(reader, LengthDelimitedCodec::new());
-    let mut writer = FramedWrite::new(writer, LengthDelimitedCodec::new());
 
-    // Channel for serializing all writes to the server — increased buffer for RDP throughput
-    let (tx_to_server, mut rx_to_server) = mpsc::channel::<RfrpFrame>(256);
-
-    // Spawn a task that writes encrypted frames to the server
-    let write_cipher = Arc::clone(&cipher);
-    let write_task = task::spawn(async move {
-        while let Some(frame) = rx_to_server.recv().await {
-            let bytes = RfrpFrame::encode_encrypted(&frame, &write_cipher);
-            if let Err(e) = writer.send(Bytes::from(bytes)).await {
-                error!("Failed to send frame to server: {}", e);
-                break;
-            }
-        }
-        info!("Write task ended");
-    });
+    // Priority-based coalescing write task:
+    // - Hi-priority: small frames (input events) sent immediately
+    // - Lo-priority: large frames (screen data) buffered & coalesced
+    let (tx_to_server, _write_handle) = coalesce::spawn_write_task(
+        FramedWrite::new(writer, LengthDelimitedCodec::new()),
+        Arc::clone(&cipher),
+    );
 
     // Phase 1: Register all proxies
     for client_info in config.get_client_proxy() {
@@ -118,6 +109,14 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
 
     info!("All proxies registered, entering data forwarding loop");
 
+    // Pre-build proxy name → ClientInfo lookup map for Data frame routing.
+    // Avoids carrying full ClientInfo in every Data frame on the wire.
+    let proxy_configs: HashMap<String, Arc<ClientInfo>> = config
+        .get_client_proxy()
+        .iter()
+        .map(|ci| (ci.get_name().to_string(), Arc::new(ci.clone())))
+        .collect();
+
     // Per-proxy internal connection maps so conn_ids don't collide
     let proxy_conns: ProxyInternalConnMap = Arc::new(Mutex::new(HashMap::new()));
 
@@ -148,7 +147,16 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
                 let conn_id = data_info.conn_id;
                 let data = data_info.data;
                 let tx_to_server = tx_to_server.clone();
-                let proxy_name = data_info.client.get_name().to_string();
+                let proxy_name = data_info.proxy_name.clone();
+
+                // Look up the ClientInfo from our pre-built config map
+                let client_info = match proxy_configs.get(&proxy_name) {
+                    Some(ci) => Arc::clone(ci),
+                    None => {
+                        error!("Unknown proxy '{}' in data frame", proxy_name);
+                        continue;
+                    }
+                };
 
                 // Get or create the per-proxy connection map
                 let conns = {
@@ -160,8 +168,7 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
 
                 // Get or create a connection to the internal service
                 let sender =
-                    get_or_create_internal_conn(&conns, conn_id, &data_info.client, tx_to_server)
-                        .await;
+                    get_or_create_internal_conn(&conns, conn_id, &client_info, tx_to_server).await;
 
                 match sender {
                     Some(sender) => {
@@ -177,7 +184,7 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
                     None => {
                         error!(
                             "Could not establish connection to internal service {} for conn {}",
-                            data_info.client.get_addr(),
+                            client_info.get_addr(),
                             conn_id
                         );
                     }
@@ -202,7 +209,7 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
     }
 
     // Abort the write task so it doesn't hang
-    write_task.abort();
+    _write_handle.abort();
     info!("Client proxy session ended");
 }
 
@@ -274,29 +281,27 @@ async fn get_or_create_internal_conn(
     });
 
     // Spawn read task: reads responses from internal service → sends back to server
-    let ci = Arc::clone(client_info);
+    let proxy_name = client_info.get_name().to_string();
     let cid = conn_id;
     let conns_cleanup = Arc::clone(conns);
     task::spawn(async move {
-        let mut buf = BytesMut::with_capacity(32768);
+        let mut buf = BytesMut::with_capacity(65536);
         loop {
             match read_half.read_buf(&mut buf).await {
                 Ok(0) => {
                     info!(
                         "Internal service for proxy '{}' conn {} closed connection",
-                        ci.get_name(),
-                        cid
+                        proxy_name, cid
                     );
                     break;
                 }
                 Ok(_) => {
                     let data = buf.split().freeze();
-                    let frame = RfrpFrame::new_data_frame(data, &ci, cid);
+                    let frame = RfrpFrame::new_data_frame(data, &proxy_name, cid);
                     if tx_to_server.send(frame).await.is_err() {
                         error!(
                             "Failed to send response to server for proxy '{}' conn {}",
-                            ci.get_name(),
-                            cid
+                            proxy_name, cid
                         );
                         break;
                     }
@@ -304,9 +309,7 @@ async fn get_or_create_internal_conn(
                 Err(e) => {
                     error!(
                         "Read error from internal service for proxy '{}' conn {}: {}",
-                        ci.get_name(),
-                        cid,
-                        e
+                        proxy_name, cid, e
                     );
                     break;
                 }
@@ -316,8 +319,7 @@ async fn get_or_create_internal_conn(
         conns_cleanup.lock().await.remove(&cid);
         info!(
             "Cleaned up internal connection for proxy '{}' conn {}",
-            ci.get_name(),
-            cid
+            proxy_name, cid
         );
     });
 
