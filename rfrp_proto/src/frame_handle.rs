@@ -94,7 +94,7 @@ pub async fn handle_reg_frame(
 
         // Spawn read task: external user → client
         let tx = tx_channel.clone();
-        let ci = Arc::clone(&client_info);
+        let proxy_name = client_info.get_name().to_string();
         let cid = conn_id;
         let routing_cleanup = routing.clone();
         task::spawn(async move {
@@ -104,20 +104,17 @@ pub async fn handle_reg_frame(
                     Ok(0) => {
                         info!(
                             "Proxy '{}' conn {}: external peer {} closed connection",
-                            ci.get_name(),
-                            cid,
-                            peer
+                            proxy_name, cid, peer
                         );
                         break;
                     }
                     Ok(_) => {
                         let data = buf.split().freeze();
-                        let frame = RfrpFrame::new_data_frame(data, ci.get_name(), cid);
+                        let frame = RfrpFrame::new_data_frame(data, &proxy_name, cid);
                         if tx.send(frame).await.is_err() {
                             error!(
                                 "Proxy '{}' conn {}: failed to send data frame to client, channel closed",
-                                ci.get_name(),
-                                cid
+                                proxy_name, cid
                             );
                             break;
                         }
@@ -125,9 +122,7 @@ pub async fn handle_reg_frame(
                     Err(e) => {
                         error!(
                             "Proxy '{}' conn {}: read error from external: {}",
-                            ci.get_name(),
-                            cid,
-                            e
+                            proxy_name, cid, e
                         );
                         break;
                     }
@@ -137,27 +132,24 @@ pub async fn handle_reg_frame(
             routing_cleanup.lock().await.remove(&cid);
             info!(
                 "Proxy '{}' conn {}: cleaned up from routing table",
-                ci.get_name(),
-                cid
+                proxy_name, cid
             );
         });
 
         // Spawn write task: client → external user
-        let ci = Arc::clone(&client_info);
+        let proxy_name = client_info.get_name().to_string();
         let cid = conn_id;
         task::spawn(async move {
             while let Some(data) = rx_to_remote.recv().await {
                 if let Err(e) = remote_write.write_all(&data).await {
                     error!(
                         "Proxy '{}' conn {}: write error to external: {}",
-                        ci.get_name(),
-                        cid,
-                        e
+                        proxy_name, cid, e
                     );
                     break;
                 }
             }
-            info!("Proxy '{}' conn {}: write task ended", ci.get_name(), cid);
+            info!("Proxy '{}' conn {}: write task ended", proxy_name, cid);
         });
     }
 }

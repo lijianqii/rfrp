@@ -41,6 +41,10 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
     // Track proxy listener tasks so we can abort them on disconnect
     let mut proxy_tasks: Vec<JoinHandle<()>> = Vec::new();
 
+    // Cache the last looked-up routing table to avoid locking proxy_routing
+    // on every Data frame. The RoutingTable Arc never changes once registered.
+    let mut cached_routing: Option<(String, RoutingTable)> = None;
+
     // Main read loop: receive frames from the client
     loop {
         let bytes = match reader.next().await {
@@ -86,12 +90,21 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                 warn!("Unexpected RegisterAck frame received on server");
             }
             RfrpFrame::Data(data_info) => {
-                // Step 1: clone the proxy's routing table Arc out of the map
-                let routing: Option<RoutingTable> = {
-                    let routing_map = proxy_routing.lock().await;
-                    routing_map.get(&data_info.proxy_name).cloned()
+                // Use cached routing table if proxy name matches, otherwise lock
+                let routing = match &cached_routing {
+                    Some((name, rt)) if name == &data_info.proxy_name => Some(rt.clone()),
+                    _ => {
+                        let rt = {
+                            let routing_map = proxy_routing.lock().await;
+                            routing_map.get(&data_info.proxy_name).cloned()
+                        };
+                        if let Some(ref rt) = rt {
+                            cached_routing = Some((data_info.proxy_name.clone(), rt.clone()));
+                        }
+                        rt
+                    }
                 };
-                // Step 2: look up conn_id in the proxy's own routing table
+                // Look up conn_id in the proxy's routing table
                 let sender = match routing {
                     Some(rt) => {
                         let table = rt.lock().await;

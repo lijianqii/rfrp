@@ -146,12 +146,12 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
             RfrpFrame::Data(data_info) => {
                 let conn_id = data_info.conn_id;
                 let data = data_info.data;
-                let tx_to_server = tx_to_server.clone();
                 let proxy_name = data_info.proxy_name.clone();
 
-                // Look up the ClientInfo from our pre-built config map
+                // Look up the ClientInfo from our pre-built config map.
+                // No Arc::clone here — get_or_create_internal_conn only needs &Arc.
                 let client_info = match proxy_configs.get(&proxy_name) {
-                    Some(ci) => Arc::clone(ci),
+                    Some(ci) => ci,
                     None => {
                         error!("Unknown proxy '{}' in data frame", proxy_name);
                         continue;
@@ -166,9 +166,10 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
                         .clone()
                 };
 
-                // Get or create a connection to the internal service
+                // Get or create a connection to the internal service.
+                // tx_to_server is borrowed here — only cloned on the slow path.
                 let sender =
-                    get_or_create_internal_conn(&conns, conn_id, &client_info, tx_to_server).await;
+                    get_or_create_internal_conn(&conns, conn_id, client_info, &tx_to_server).await;
 
                 match sender {
                     Some(sender) => {
@@ -214,11 +215,13 @@ pub async fn run_proxy(remote: TcpStream, config: ConfigInfo) {
 }
 
 /// Get an existing internal connection for `conn_id`, or create a new one.
+/// `tx_to_server` is borrowed to avoid an unnecessary clone on the fast path;
+/// it is cloned only when spawning a new read task.
 async fn get_or_create_internal_conn(
     conns: &InternalConnMap,
     conn_id: u64,
     client_info: &Arc<ClientInfo>,
-    tx_to_server: mpsc::Sender<RfrpFrame>,
+    tx_to_server: &mpsc::Sender<RfrpFrame>,
 ) -> Option<mpsc::Sender<Bytes>> {
     // Fast path: connection already exists
     {
@@ -284,6 +287,7 @@ async fn get_or_create_internal_conn(
     let proxy_name = client_info.get_name().to_string();
     let cid = conn_id;
     let conns_cleanup = Arc::clone(conns);
+    let tx_to_server = tx_to_server.clone(); // clone only on slow path
     task::spawn(async move {
         let mut buf = BytesMut::with_capacity(65536);
         loop {
