@@ -1,7 +1,6 @@
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use bytes::Bytes;
 use crate::config_info::base_info_ops::BaseInfoGetter;
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RunningMode {
@@ -19,7 +18,10 @@ pub struct ControlInfo {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DataInfo {
     pub conn_id: u64,
-    pub client: Arc<ClientInfo>,
+    /// Proxy name — used to look up routing on the server side
+    /// and client config on the client side. Avoids carrying the full
+    /// ClientInfo (which never changes) in every data frame.
+    pub proxy_name: String,
     pub data: Bytes,
 }
 
@@ -115,7 +117,6 @@ impl ClientInfo {
     pub fn get_p2p_stun_server(&self) -> Option<&str> {
         self.p2p_stun_server.as_deref()
     }
-
 }
 
 impl ServerInfo {
