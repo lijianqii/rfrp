@@ -16,3 +16,8 @@ rmp-serde = { workspace = true }
 bytes = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+rfrp_config = { path = "../rfrp_config" }
+serde_json = { workspace = true }
