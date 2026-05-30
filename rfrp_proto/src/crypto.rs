@@ -1,9 +1,13 @@
 use aes_gcm::{
     Aes256Gcm, Nonce,
-    aead::{Aead, AeadInPlace, KeyInit},
+    aead::{AeadInPlace, KeyInit, Tag},
 };
+use bytes::BytesMut;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Concrete tag type for AES-256-GCM.
+type AesTag = Tag<Aes256Gcm>;
 
 /// Pre-computed AES-256-GCM cipher for a given key.
 /// Create once per connection and reuse for all encrypt/decrypt calls.
@@ -34,59 +38,132 @@ impl Cipher {
         }
     }
 
+    /// Shared encryption logic. Encrypts `data` in-place and returns the
+    /// nonce bytes and authentication tag. Works on any `&mut [u8]`.
+    fn encrypt_inner(&self, data: &mut [u8]) -> ([u8; 12], AesTag) {
+        let counter = self.nonce_counter.fetch_add(1, Ordering::Relaxed);
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[..8].copy_from_slice(&counter.to_be_bytes());
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let tag = self
+            .aead
+            .encrypt_in_place_detached(nonce, b"", data)
+            .expect("Encryption failed");
+
+        (nonce_bytes, tag)
+    }
+
     /// Encrypt plaintext with AES-256-GCM.
-    /// Uses an atomic counter for the nonce instead of CSPRNG, which is:
-    /// - Faster (no syscall / CSPRNG overhead per frame)
-    /// - Equally secure for GCM (only requires uniqueness, not randomness)
-    /// Returns: [nonce (12 bytes)][ciphertext + tag]
+    /// Returns: [ciphertext][nonce (12B)][tag (16B)]
     pub fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
         let mut buf = plaintext.to_vec();
         self.encrypt_in_place(&mut buf);
         buf
     }
 
-    /// Encrypt data in-place.
+    /// Encrypt data in-place on a `Vec<u8>`.
     ///
     /// Input:  `buf` contains plaintext.
-    /// Output: `buf` = [nonce (12B)][ciphertext (same len as plaintext)][tag (16B)].
+    /// Output: `buf` = [ciphertext (same len as plaintext)][nonce (12B)][tag (16B)].
     ///
-    /// This avoids allocating a separate ciphertext buffer — the plaintext is
-    /// encrypted in-place, then shifted right 12 bytes to make room for the nonce,
-    /// and the 16-byte tag is appended.
+    /// Nonce is appended at the end to avoid the O(n) memmove that prepending
+    /// would require. This is a significant optimization for large frames.
     pub fn encrypt_in_place(&self, buf: &mut Vec<u8>) {
-        // 64-bit counter (big-endian) + 4 zero bytes = 12-byte unique nonce
-        let counter = self.nonce_counter.fetch_add(1, Ordering::Relaxed);
-        let mut nonce_bytes = [0u8; 12];
-        nonce_bytes[..8].copy_from_slice(&counter.to_be_bytes());
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let (nonce_bytes, tag) = self.encrypt_inner(buf);
+        buf.extend_from_slice(&nonce_bytes);
+        buf.extend_from_slice(&*tag);
+    }
 
-        // Encrypt plaintext in-place, get detached tag
-        let tag = self
-            .aead
-            .encrypt_in_place_detached(nonce, b"", buf)
-            .expect("Encryption failed");
-
-        // buf now contains ciphertext (same length as original plaintext).
-        // Make room: shift ciphertext right 12 bytes for nonce, append 16-byte tag.
-        let ciphertext_len = buf.len();
-        buf.resize(ciphertext_len + 12 + 16, 0);
-        buf.copy_within(0..ciphertext_len, 12);
-        buf[..12].copy_from_slice(&nonce_bytes);
-        buf[ciphertext_len + 12..].copy_from_slice(&tag);
+    /// Encrypt data in-place on a `BytesMut`.
+    ///
+    /// Same output format as `encrypt_in_place`: [ciphertext][nonce (12B)][tag (16B)].
+    /// Used with the `BytesMut`-based encode path for zero-copy frame sending.
+    pub fn encrypt_in_place_bytes_mut(&self, buf: &mut BytesMut) {
+        let (nonce_bytes, tag) = self.encrypt_inner(buf);
+        buf.extend_from_slice(&nonce_bytes);
+        buf.extend_from_slice(&*tag);
     }
 
     /// Decrypt ciphertext that was produced by `encrypt`.
-    /// Expects: [nonce (12 bytes)][ciphertext + tag]
+    /// Expects: [ciphertext][nonce (12B)][tag (16B)]
     pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, String> {
-        if ciphertext.len() < 12 {
-            return Err("Ciphertext too short: missing nonce".into());
+        if ciphertext.len() < 28 {
+            return Err("Ciphertext too short: missing nonce/tag".into());
         }
 
-        let (nonce_bytes, encrypted) = ciphertext.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let split = ciphertext.len() - 28;
+        // Copy nonce and tag into owned arrays to avoid borrow conflicts
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes.copy_from_slice(&ciphertext[split..split + 12]);
+        let mut tag_bytes = [0u8; 16];
+        tag_bytes.copy_from_slice(&ciphertext[split + 12..]);
+
+        let mut plaintext = ciphertext[..split].to_vec();
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let tag = AesTag::from_slice(&tag_bytes);
 
         self.aead
-            .decrypt(nonce, encrypted)
-            .map_err(|e| format!("Decryption failed: {}", e))
+            .decrypt_in_place_detached(nonce, b"", &mut plaintext, tag)
+            .map_err(|e| format!("Decryption failed: {}", e))?;
+
+        Ok(plaintext)
+    }
+
+    /// Decrypt ciphertext in-place on a `Vec<u8>`.
+    /// Expects: [ciphertext][nonce (12B)][tag (16B)]
+    /// After decryption, `buf` contains plaintext and its length is adjusted.
+    /// Returns a reference to the plaintext slice.
+    pub fn decrypt_in_place<'a>(&self, buf: &'a mut Vec<u8>) -> Result<&'a [u8], String> {
+        if buf.len() < 28 {
+            return Err("Ciphertext too short: missing nonce/tag".into());
+        }
+
+        let split = buf.len() - 28;
+        // Copy nonce and tag into owned arrays to avoid borrow conflicts
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes.copy_from_slice(&buf[split..split + 12]);
+        let mut tag_bytes = [0u8; 16];
+        tag_bytes.copy_from_slice(&buf[split + 12..]);
+
+        buf.truncate(split);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let tag = AesTag::from_slice(&tag_bytes);
+
+        self.aead
+            .decrypt_in_place_detached(nonce, b"", buf.as_mut_slice(), tag)
+            .map_err(|e| format!("Decryption failed: {}", e))?;
+
+        Ok(buf.as_slice())
+    }
+
+    /// Decrypt ciphertext in-place on a `BytesMut`.
+    /// Expects: [ciphertext][nonce (12B)][tag (16B)]
+    /// After decryption, `buf` contains plaintext and its length is adjusted.
+    /// Returns a reference to the plaintext slice.
+    pub fn decrypt_in_place_bytes_mut<'a>(
+        &self,
+        buf: &'a mut BytesMut,
+    ) -> Result<&'a [u8], String> {
+        if buf.len() < 28 {
+            return Err("Ciphertext too short: missing nonce/tag".into());
+        }
+
+        let split = buf.len() - 28;
+        // Copy nonce and tag into owned arrays to avoid borrow conflicts
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes.copy_from_slice(&buf[split..split + 12]);
+        let mut tag_bytes = [0u8; 16];
+        tag_bytes.copy_from_slice(&buf[split + 12..]);
+
+        buf.truncate(split);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let tag = AesTag::from_slice(&tag_bytes);
+
+        self.aead
+            .decrypt_in_place_detached(nonce, b"", &mut buf[..], tag)
+            .map_err(|e| format!("Decryption failed: {}", e))?;
+
+        Ok(&buf[..])
     }
 }

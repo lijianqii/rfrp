@@ -1,6 +1,7 @@
 use crate::config_info::base_info_ops::BaseInfoGetter;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RunningMode {
@@ -19,9 +20,10 @@ pub struct ControlInfo {
 pub struct DataInfo {
     pub conn_id: u64,
     /// Proxy name — used to look up routing on the server side
-    /// and client config on the client side. Avoids carrying the full
-    /// ClientInfo (which never changes) in every data frame.
-    pub proxy_name: String,
+    /// and client config on the client side. Uses `Arc<str>` so that
+    /// cloning per frame is a cheap reference count bump instead of
+    /// a heap allocation. Serialized as a plain string on the wire.
+    pub proxy_name: Arc<str>,
     pub data: Bytes,
 }
 
@@ -37,6 +39,9 @@ pub struct ServerInfo {
     server_ip: String,
     server_port: u16,
     auth_token: String,
+    /// Cached "ip:port" string, computed once at construction time.
+    #[serde(skip, default)]
+    addr: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -46,6 +51,9 @@ pub struct ClientInfo {
     proxy_ip: String,
     proxy_port: u16,
     proxy_con_type: String,
+    /// Cached "ip:port" string, computed once at construction time.
+    #[serde(skip, default)]
+    addr: String,
 }
 
 /// Server's response to a registration request.
@@ -56,6 +64,16 @@ pub struct RegisterResponse {
 }
 
 impl ConfigInfo {
+    /// Finish initialization after deserialization: cache computed fields.
+    /// Call this once after `serde_json::from_str` or `ConfigInfo::new`.
+    pub fn init(mut self) -> Self {
+        self.server.addr = format!("{}:{}", self.server.server_ip, self.server.server_port);
+        for client in &mut self.client_proxy {
+            client.addr = format!("{}:{}", client.proxy_ip, client.proxy_port);
+        }
+        self
+    }
+
     pub fn get_running_mode(&self) -> &RunningMode {
         &self.running_mode
     }
@@ -97,6 +115,10 @@ impl BaseInfoGetter for ClientInfo {
     fn get_port(&self) -> u16 {
         self.proxy_port
     }
+
+    fn get_addr(&self) -> &str {
+        &self.addr
+    }
 }
 
 impl BaseInfoGetter for ServerInfo {
@@ -106,5 +128,9 @@ impl BaseInfoGetter for ServerInfo {
 
     fn get_port(&self) -> u16 {
         self.server_port
+    }
+
+    fn get_addr(&self) -> &str {
+        &self.addr
     }
 }

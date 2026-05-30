@@ -1,6 +1,6 @@
+use super::config_info::base_info_ops::BaseInfoGetter;
 use super::config_info::base_types::ConfigInfo;
 use super::config_info::base_types::RunningMode;
-use super::config_info::base_info_ops::BaseInfoGetter;
 use log::{debug, warn};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -11,18 +11,21 @@ impl ConfigInfo {
             Err(e) => panic!("Failed to read config file: {}", e),
         };
 
-        debug!("Parsing config file: {} ({} bytes)", config_path, content.len());
+        debug!(
+            "Parsing config file: {} ({} bytes)",
+            config_path,
+            content.len()
+        );
 
         let configs: ConfigInfo = match serde_json::from_str(&content) {
             Ok(config) => config,
             Err(e) => panic!("Failed to parse config file: {}", e),
         };
+        let configs = configs.init();
 
         match configs.get_running_mode() {
             RunningMode::Unknown => panic!("Running mode is unknown"),
-            _ => {
-                configs
-            }
+            _ => configs,
         }
     }
 
@@ -50,10 +53,16 @@ impl ConfigInfo {
             return Err("server.server_ip is empty".to_string());
         }
         if !Self::is_valid_ip(ip) {
-            return Err(format!("server.server_ip '{}' is not a valid IPv4/IPv6 address", ip));
+            return Err(format!(
+                "server.server_ip '{}' is not a valid IPv4/IPv6 address",
+                ip
+            ));
         }
         if !Self::is_valid_port(port) {
-            return Err(format!("server.server_port {} is invalid (must be 1-65535)", port));
+            return Err(format!(
+                "server.server_port {} is invalid (must be 1-65535)",
+                port
+            ));
         }
         if server.get_auth_token().is_empty() {
             return Err("server.auth_token is empty".to_string());
@@ -99,7 +108,13 @@ impl ConfigInfo {
             }
 
             valid_count += 1;
-            debug!("client_proxy[{}] '{}' validation passed: {}:{}", i, client.get_name(), ip, port);
+            debug!(
+                "client_proxy[{}] '{}' validation passed: {}:{}",
+                i,
+                client.get_name(),
+                ip,
+                port
+            );
         }
 
         if valid_count == 0 {
@@ -139,7 +154,10 @@ impl ConfigInfo {
         debug!("  server_port:  {}", self.get_server().get_port());
         debug!("  server_addr:  {}", self.get_server().get_addr());
         debug!("  auth_token:   <redacted>");
-        debug!("--- ClientProxy ({} entries) ---", self.get_client_proxy().len());
+        debug!(
+            "--- ClientProxy ({} entries) ---",
+            self.get_client_proxy().len()
+        );
         for (i, client) in self.get_client_proxy().iter().enumerate() {
             debug!("  [{}] name:        {}", i, client.get_name());
             debug!("      bind_port:    {}", client.get_bind_port());

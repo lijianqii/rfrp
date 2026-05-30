@@ -3,7 +3,7 @@ use log::{error, info, warn};
 use rfrp_config::config_info::base_types::ClientInfo;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task;
@@ -21,12 +21,13 @@ pub async fn handle_reg_frame(
     routing_table: RoutingTable,
 ) {
     let client_info = Arc::new(client_info);
+    let proxy_name: Arc<str> = Arc::from(client_info.get_name());
     let listener = match TcpListener::bind(format!("0.0.0.0:{}", client_info.get_bind_port())).await
     {
         Ok(listener) => {
             info!(
                 "Proxy '{}' bound to port {}",
-                client_info.get_name(),
+                proxy_name,
                 client_info.get_bind_port()
             );
             listener
@@ -34,7 +35,7 @@ pub async fn handle_reg_frame(
         Err(e) => {
             error!(
                 "Failed to bind proxy '{}' on port {}: {}",
-                client_info.get_name(),
+                proxy_name,
                 client_info.get_bind_port(),
                 e
             );
@@ -58,11 +59,7 @@ pub async fn handle_reg_frame(
         let (remote, peer) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
-                error!(
-                    "Proxy '{}' failed to accept connection: {}",
-                    client_info.get_name(),
-                    e
-                );
+                error!("Proxy '{}' failed to accept connection: {}", proxy_name, e);
                 continue;
             }
         };
@@ -72,9 +69,7 @@ pub async fn handle_reg_frame(
 
         info!(
             "Proxy '{}': accepted external conn {} from {}",
-            client_info.get_name(),
-            conn_id,
-            peer
+            proxy_name, conn_id, peer
         );
 
         // Disable Nagle's algorithm for low-latency RDP forwarding
@@ -82,7 +77,7 @@ pub async fn handle_reg_frame(
             warn!("Failed to set TCP_NODELAY on external socket: {}", e);
         }
 
-        let (mut remote_read, mut remote_write) = remote.into_split();
+        let (mut remote_read, remote_write) = remote.into_split();
         let tx_channel = tx_channel.clone();
         let routing = routing_table.clone();
 
@@ -94,7 +89,7 @@ pub async fn handle_reg_frame(
 
         // Spawn read task: external user → client
         let tx = tx_channel.clone();
-        let proxy_name = client_info.get_name().to_string();
+        let proxy_name_read = Arc::clone(&proxy_name);
         let cid = conn_id;
         let routing_cleanup = routing.clone();
         task::spawn(async move {
@@ -104,17 +99,17 @@ pub async fn handle_reg_frame(
                     Ok(0) => {
                         info!(
                             "Proxy '{}' conn {}: external peer {} closed connection",
-                            proxy_name, cid, peer
+                            proxy_name_read, cid, peer
                         );
                         break;
                     }
                     Ok(_) => {
                         let data = buf.split().freeze();
-                        let frame = RfrpFrame::new_data_frame(data, &proxy_name, cid);
+                        let frame = RfrpFrame::new_data_frame(data, &proxy_name_read, cid);
                         if tx.send(frame).await.is_err() {
                             error!(
                                 "Proxy '{}' conn {}: failed to send data frame to client, channel closed",
-                                proxy_name, cid
+                                proxy_name_read, cid
                             );
                             break;
                         }
@@ -122,7 +117,7 @@ pub async fn handle_reg_frame(
                     Err(e) => {
                         error!(
                             "Proxy '{}' conn {}: read error from external: {}",
-                            proxy_name, cid, e
+                            proxy_name_read, cid, e
                         );
                         break;
                     }
@@ -132,24 +127,32 @@ pub async fn handle_reg_frame(
             routing_cleanup.lock().await.remove(&cid);
             info!(
                 "Proxy '{}' conn {}: cleaned up from routing table",
-                proxy_name, cid
+                proxy_name_read, cid
             );
         });
 
         // Spawn write task: client → external user
-        let proxy_name = client_info.get_name().to_string();
+        // Wraps the write half in BufWriter to reduce syscall overhead
+        // for small frames arriving in quick succession.
+        let proxy_name_write = Arc::clone(&proxy_name);
         let cid = conn_id;
         task::spawn(async move {
+            let mut remote_write = BufWriter::new(remote_write);
             while let Some(data) = rx_to_remote.recv().await {
                 if let Err(e) = remote_write.write_all(&data).await {
                     error!(
                         "Proxy '{}' conn {}: write error to external: {}",
-                        proxy_name, cid, e
+                        proxy_name_write, cid, e
                     );
                     break;
                 }
+                // Flush after each complete message to ensure timely delivery
+                let _ = remote_write.flush().await;
             }
-            info!("Proxy '{}' conn {}: write task ended", proxy_name, cid);
+            info!(
+                "Proxy '{}' conn {}: write task ended",
+                proxy_name_write, cid
+            );
         });
     }
 }

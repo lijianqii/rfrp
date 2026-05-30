@@ -2,16 +2,23 @@ mod run_proxy;
 
 use log::{info, warn};
 use rfrp_config::config_info::{base_info_ops::BaseInfoGetter, base_types::ConfigInfo};
-use tokio::net::TcpStream;
-use std::time::Duration;
+use rfrp_proto::crypto::{self, Cipher};
 use run_proxy::run_proxy;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::TcpStream;
 
 /// Maximum delay between reconnection attempts (in seconds).
 const MAX_RECONNECT_DELAY: u64 = 60;
 /// Initial delay for the first reconnection attempt (in seconds).
 const INITIAL_RECONNECT_DELAY: u64 = 3;
 
-pub async fn rfrp_client(config: ConfigInfo) {
+pub async fn rfrp_client(config: Arc<ConfigInfo>) {
+    // Derive key and cipher once — reused across all reconnections.
+    // This avoids recomputing SHA-256 + AES key schedule on every reconnect.
+    let key = crypto::derive_key(config.get_server().get_auth_token());
+    let cipher = Arc::new(Cipher::new(&key));
+
     let mut attempt: u32 = 0;
 
     loop {
@@ -20,16 +27,12 @@ pub async fn rfrp_client(config: ConfigInfo) {
         let server_addr = config.get_server().get_addr();
         info!(
             "Connecting to server at {} (attempt {})...",
-            server_addr,
-            attempt
+            server_addr, attempt
         );
 
-        let remote = match TcpStream::connect(&server_addr).await {
+        let remote = match TcpStream::connect(server_addr).await {
             Ok(stream) => {
-                info!(
-                    "Connected to server at {}",
-                    server_addr
-                );
+                info!("Connected to server at {}", server_addr);
                 stream
             }
             Err(e) => {
@@ -45,7 +48,8 @@ pub async fn rfrp_client(config: ConfigInfo) {
         };
 
         // Run the proxy session. This returns when the connection drops.
-        run_proxy(remote, config.clone()).await;
+        // Pass Arc references — no cloning of config or cipher needed.
+        run_proxy(remote, Arc::clone(&config), Arc::clone(&cipher)).await;
 
         // If we get here, the connection was lost. Reset attempt counter
         // for the next connection (but keep a small delay).

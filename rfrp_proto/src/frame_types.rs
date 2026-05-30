@@ -5,6 +5,7 @@ use rfrp_config::config_info::base_types::RegisterResponse;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RfrpFrame {
@@ -17,10 +18,11 @@ pub enum RfrpFrame {
 impl RfrpFrame {
     /// Create a Data frame. Uses `proxy_name` instead of the full `ClientInfo`
     /// to avoid redundant serialization of unchanging data every frame.
-    pub fn new_data_frame(data: Bytes, proxy_name: &str, conn_id: u64) -> Self {
+    /// `proxy_name` is `Arc<str>` so cloning is a cheap ref-count bump.
+    pub fn new_data_frame(data: Bytes, proxy_name: &Arc<str>, conn_id: u64) -> Self {
         RfrpFrame::Data(DataInfo {
             conn_id,
-            proxy_name: proxy_name.to_string(),
+            proxy_name: Arc::clone(proxy_name),
             data,
         })
     }

@@ -1,18 +1,19 @@
+use dashmap::DashMap;
 use log::{error, info, warn};
 use rfrp_proto::coalesce;
 use rfrp_proto::crypto::{self, Cipher};
 use rfrp_proto::frame_handle::{RoutingTable, handle_reg_frame};
 use rfrp_proto::frame_types::RfrpFrame;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 use tokio::task::{self, JoinHandle};
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 /// Maps proxy name → its per-connection routing table.
-type ProxyRoutingMap = Arc<Mutex<HashMap<String, RoutingTable>>>;
+/// Uses DashMap for lock-free concurrent reads; writes (registration)
+/// happen infrequently so the sharding overhead is negligible.
+type ProxyRoutingMap = Arc<DashMap<Arc<str>, RoutingTable>>;
 
 pub async fn run_proxy(client: TcpStream, auth_token: String) {
     if let Err(e) = client.set_nodelay(true) {
@@ -27,23 +28,23 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
 
     let mut reader = FramedRead::new(reader, LengthDelimitedCodec::new());
 
-    // Priority-based coalescing write task:
-    // - Hi-priority: small frames (input events) sent immediately
-    // - Lo-priority: large frames (screen data) buffered & coalesced
     let (tx_channel, _write_handle) = coalesce::spawn_write_task(
         FramedWrite::new(writer, LengthDelimitedCodec::new()),
         Arc::clone(&cipher),
     );
 
     // Per-proxy routing tables so conn_ids don't collide across proxies
-    let proxy_routing: ProxyRoutingMap = Arc::new(Mutex::new(HashMap::new()));
+    let proxy_routing: ProxyRoutingMap = Arc::new(DashMap::new());
 
     // Track proxy listener tasks so we can abort them on disconnect
     let mut proxy_tasks: Vec<JoinHandle<()>> = Vec::new();
 
-    // Cache the last looked-up routing table to avoid locking proxy_routing
-    // on every Data frame. The RoutingTable Arc never changes once registered.
-    let mut cached_routing: Option<(String, RoutingTable)> = None;
+    // Cache the last looked-up routing table to avoid DashMap lookup
+    // on every Data frame.
+    let mut cached_routing: Option<(Arc<str>, RoutingTable)> = None;
+
+    // Reusable buffer for decoding frames (avoids per-frame Vec allocation)
+    let mut decode_buf: Vec<u8> = Vec::new();
 
     // Main read loop: receive frames from the client
     loop {
@@ -59,7 +60,10 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
             }
         };
 
-        let frame = match RfrpFrame::decode_encrypted(&bytes, &cipher) {
+        // Copy bytes into reusable decode buffer and decrypt in-place
+        decode_buf.clear();
+        decode_buf.extend_from_slice(&bytes);
+        let frame = match RfrpFrame::decode_encrypted(&mut decode_buf, &cipher) {
             Ok(frame) => frame,
             Err(e) => {
                 error!("Failed to decode frame from client: {}", e);
@@ -70,13 +74,10 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
         match frame {
             RfrpFrame::Register(client_info) => {
                 info!("Client registered proxy: {:?}", client_info.get_name());
-                let name = client_info.get_name().to_string();
-                // Each proxy gets its own routing table so conn_ids don't collide
-                let routing: RoutingTable = Arc::new(Mutex::new(HashMap::new()));
-                proxy_routing
-                    .lock()
-                    .await
-                    .insert(name.clone(), Arc::clone(&routing));
+                let name: Arc<str> = Arc::from(client_info.get_name());
+                let routing: RoutingTable =
+                    Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+                proxy_routing.insert(Arc::clone(&name), Arc::clone(&routing));
                 let tx = tx_channel.clone();
                 let handle = task::spawn(async move {
                     handle_reg_frame(client_info, tx, routing).await;
@@ -90,20 +91,24 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                 warn!("Unexpected RegisterAck frame received on server");
             }
             RfrpFrame::Data(data_info) => {
-                // Use cached routing table if proxy name matches, otherwise lock
+                let proxy_name = &data_info.proxy_name;
+
+                // Use cached routing table if proxy name matches, otherwise look up in DashMap
                 let routing = match &cached_routing {
-                    Some((name, rt)) if name == &data_info.proxy_name => Some(rt.clone()),
+                    Some((name, rt)) if name.as_ref() == proxy_name.as_ref() => {
+                        Some(Arc::clone(rt))
+                    }
                     _ => {
-                        let rt = {
-                            let routing_map = proxy_routing.lock().await;
-                            routing_map.get(&data_info.proxy_name).cloned()
-                        };
+                        let rt = proxy_routing
+                            .get(proxy_name.as_ref())
+                            .map(|r| Arc::clone(r.value()));
                         if let Some(ref rt) = rt {
-                            cached_routing = Some((data_info.proxy_name.clone(), rt.clone()));
+                            cached_routing = Some((Arc::clone(proxy_name), Arc::clone(rt)));
                         }
                         rt
                     }
                 };
+
                 // Look up conn_id in the proxy's routing table
                 let sender = match routing {
                     Some(rt) => {
@@ -124,7 +129,7 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                     None => {
                         error!(
                             "No route found for conn {} (proxy '{}'), connection may have been closed",
-                            data_info.conn_id, data_info.proxy_name
+                            data_info.conn_id, proxy_name
                         );
                     }
                 }
@@ -137,6 +142,6 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
         handle.abort();
     }
     // Clean up routing table entries
-    proxy_routing.lock().await.clear();
+    proxy_routing.clear();
     info!("Server proxy session ended");
 }
