@@ -1,6 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use std::io;
 
+use crate::compress;
 use crate::crypto::Cipher;
 use crate::frame_types::RfrpFrame;
 
@@ -25,19 +26,21 @@ impl RfrpFrame {
         rmp_serde::to_vec(object).expect("Failed to encode RfrpFrame")
     }
 
-    /// Serialize to MessagePack, then encrypt with AES-256-GCM.
-    /// Uses a reusable `BytesMut` buffer to achieve zero-allocation on the
-    /// hot path (after the initial warmup frames fill the buffer capacity).
+    /// Serialize to MessagePack, compress with DEFLATE, then encrypt with AES-256-GCM.
+    /// Uses a reusable `BytesMut` buffer to minimize allocations on the hot path.
     ///
-    /// The buffer is cleared and reused each call. After a few frames it
-    /// reaches a stable capacity and no further heap allocations occur.
-    /// `BytesMut::split().freeze()` yields `Bytes` with zero-copy.
+    /// Pipeline: MessagePack → DEFLATE compress → AES-256-GCM encrypt
+    /// Output format: [compressed ciphertext][nonce (12B)][tag (16B)]
     pub fn encode_encrypted(object: &RfrpFrame, cipher: &Cipher, buf: &mut BytesMut) -> Bytes {
         buf.clear();
         {
             let mut writer = BytesMutWriter(&mut *buf);
             rmp_serde::encode::write(&mut writer, object).expect("Failed to encode RfrpFrame");
         }
+        // Compress serialized data before encryption
+        let compressed = compress::compress(buf);
+        buf.clear();
+        buf.extend_from_slice(&compressed);
         cipher.encrypt_in_place_bytes_mut(buf);
         buf.split().freeze()
     }

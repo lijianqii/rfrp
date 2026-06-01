@@ -1,4 +1,5 @@
 pub mod coalesce;
+pub mod compress;
 pub mod crypto;
 pub mod frame_decode;
 pub mod frame_encode;
