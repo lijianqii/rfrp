@@ -1,3 +1,4 @@
+use bytes::BytesMut;
 use dashmap::DashMap;
 use log::{error, info, warn};
 use rfrp_proto::coalesce;
@@ -43,12 +44,12 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
     // on every Data frame.
     let mut cached_routing: Option<(Arc<str>, RoutingTable)> = None;
 
-    // Reusable buffer for decoding frames (avoids per-frame Vec allocation)
-    let mut decode_buf: Vec<u8> = Vec::new();
+    // Reusable buffer for decompression output
+    let mut decomp_buf = BytesMut::new();
 
     // Main read loop: receive frames from the client
     loop {
-        let bytes = match reader.next().await {
+        let mut bytes = match reader.next().await {
             Some(Ok(bytes)) => bytes,
             Some(Err(e)) => {
                 error!("Read error from client: {}", e);
@@ -60,10 +61,8 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
             }
         };
 
-        // Copy bytes into reusable decode buffer and decrypt in-place
-        decode_buf.clear();
-        decode_buf.extend_from_slice(&bytes);
-        let frame = match RfrpFrame::decode_encrypted(&mut decode_buf, &cipher) {
+        // Decrypt and decode in-place on the codec's BytesMut — no copy needed
+        let frame = match RfrpFrame::decode_encrypted_bytes_mut(&mut bytes, &cipher, &mut decomp_buf) {
             Ok(frame) => frame,
             Err(e) => {
                 error!("Failed to decode frame from client: {}", e);
@@ -75,8 +74,7 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
             RfrpFrame::Register(client_info) => {
                 info!("Client registered proxy: {:?}", client_info.get_name());
                 let name: Arc<str> = Arc::from(client_info.get_name());
-                let routing: RoutingTable =
-                    Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+                let routing: RoutingTable = Arc::new(DashMap::new());
                 proxy_routing.insert(Arc::clone(&name), Arc::clone(&routing));
                 let tx = tx_channel.clone();
                 let handle = task::spawn(async move {
@@ -111,10 +109,7 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
 
                 // Look up conn_id in the proxy's routing table
                 let sender = match routing {
-                    Some(rt) => {
-                        let table = rt.lock().await;
-                        table.get(&data_info.conn_id).cloned()
-                    }
+                    Some(rt) => rt.get(&data_info.conn_id).map(|r| r.value().clone()),
                     None => None,
                 };
                 match sender {

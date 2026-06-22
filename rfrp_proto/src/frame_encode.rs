@@ -37,10 +37,10 @@ impl RfrpFrame {
             let mut writer = BytesMutWriter(&mut *buf);
             rmp_serde::encode::write(&mut writer, object).expect("Failed to encode RfrpFrame");
         }
-        // Compress serialized data before encryption
-        let compressed = compress::compress(buf);
-        buf.clear();
-        buf.extend_from_slice(&compressed);
+        // Split off the serialized payload (zero-copy), then compress
+        // directly back into the now-empty buffer.
+        let serialized = buf.split();
+        compress::compress_into_bytes_mut(&serialized, buf);
         cipher.encrypt_in_place_bytes_mut(buf);
         buf.split().freeze()
     }

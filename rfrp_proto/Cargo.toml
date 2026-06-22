@@ -17,3 +17,4 @@ bytes = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }
 flate2 = { workspace = true }
+dashmap = { workspace = true }

@@ -36,6 +36,9 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
         Arc::clone(&cipher),
     );
 
+    // Reusable buffer for decompression output
+    let mut decomp_buf = BytesMut::new();
+
     // Phase 1: Register all proxies
     for client_info in config.get_client_proxy() {
         debug!("Registering client proxy: {}", client_info.get_name());
@@ -50,8 +53,8 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
         // Wait for registration confirmation from server
         match reader.next().await {
             Some(Ok(resp_bytes)) => {
-                let mut decode_buf = resp_bytes.to_vec();
-                match RfrpFrame::decode_encrypted(&mut decode_buf, &cipher) {
+                let mut resp_buf = resp_bytes;
+                match RfrpFrame::decode_encrypted_bytes_mut(&mut resp_buf, &cipher, &mut decomp_buf) {
                     Ok(RfrpFrame::RegisterAck(resp)) => {
                         if resp.success {
                             info!(
@@ -119,12 +122,9 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
     // Cache the last looked-up proxy name → conns mapping
     let mut cached_conns: Option<(Arc<str>, Arc<DashMap<u64, InternalConnSender>>)> = None;
 
-    // Reusable buffer for decoding frames (avoids per-frame Vec allocation)
-    let mut decode_buf: Vec<u8> = Vec::new();
-
     // Phase 2: Main loop — forward data between server and internal services
     loop {
-        let bytes = match reader.next().await {
+        let mut bytes = match reader.next().await {
             Some(Ok(bytes)) => bytes,
             Some(Err(e)) => {
                 error!("Read error from server: {}", e);
@@ -136,10 +136,8 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
             }
         };
 
-        // Copy bytes into reusable decode buffer and decrypt in-place
-        decode_buf.clear();
-        decode_buf.extend_from_slice(&bytes);
-        let frame = match RfrpFrame::decode_encrypted(&mut decode_buf, &cipher) {
+        // Decrypt and decode in-place on the codec's BytesMut — no copy needed
+        let frame = match RfrpFrame::decode_encrypted_bytes_mut(&mut bytes, &cipher, &mut decomp_buf) {
             Ok(frame) => frame,
             Err(e) => {
                 error!("Failed to decode frame: {}", e);
@@ -263,11 +261,17 @@ async fn get_or_create_internal_conn(
     let (mut read_half, write_half) = stream.into_split();
     let (tx, mut rx) = mpsc::channel::<Bytes>(256);
 
-    // Re-check: another task may have beaten us here
-    if let Some(existing) = conns.get(&conn_id) {
-        return Some(existing.value().clone());
-    }
-    conns.insert(conn_id, tx.clone());
+    // Atomically insert — if another task beat us here, use theirs
+    let tx = match conns.entry(conn_id) {
+        dashmap::mapref::entry::Entry::Occupied(existing) => {
+            return Some(existing.get().clone());
+        }
+        dashmap::mapref::entry::Entry::Vacant(vacant) => {
+            let tx = tx.clone();
+            vacant.insert(tx.clone());
+            tx
+        }
+    };
 
     // Spawn write task: forwards data from server → internal service
     // Wraps in BufWriter to reduce syscall overhead

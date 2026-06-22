@@ -1,11 +1,11 @@
 use bytes::{Bytes, BytesMut};
+use dashmap::DashMap;
 use log::{error, info, warn};
 use rfrp_config::config_info::base_types::ClientInfo;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tokio::task;
 
 use crate::frame_types::RfrpFrame;
@@ -13,7 +13,9 @@ use crate::frame_types::RfrpFrame;
 use tokio::sync::mpsc::Sender;
 
 type ConnSender = mpsc::Sender<Bytes>;
-pub type RoutingTable = Arc<Mutex<HashMap<u64, ConnSender>>>;
+/// Lock-free routing table: maps conn_id → channel sender.
+/// Uses DashMap for concurrent access without explicit locking.
+pub type RoutingTable = Arc<DashMap<u64, ConnSender>>;
 
 pub async fn handle_reg_frame(
     client_info: ClientInfo,
@@ -85,7 +87,7 @@ pub async fn handle_reg_frame(
         let (tx_to_remote, mut rx_to_remote) = mpsc::channel::<Bytes>(256);
 
         // Register this connection in the routing table
-        routing.lock().await.insert(conn_id, tx_to_remote);
+        routing.insert(conn_id, tx_to_remote);
 
         // Spawn read task: external user → client
         let tx = tx_channel.clone();
@@ -124,7 +126,7 @@ pub async fn handle_reg_frame(
                 }
             }
             // Cleanup: remove from routing table on disconnect
-            routing_cleanup.lock().await.remove(&cid);
+            routing_cleanup.remove(&cid);
             info!(
                 "Proxy '{}' conn {}: cleaned up from routing table",
                 proxy_name_read, cid

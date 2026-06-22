@@ -25,7 +25,7 @@ pub fn spawn_write_task(
 
     let handle = tokio::task::spawn(async move {
         let mut writer = writer;
-        let mut encode_buf = BytesMut::with_capacity(4096);
+        let mut encode_buf = BytesMut::with_capacity(65536);
         while let Some(frame) = rx.recv().await {
             let bytes = RfrpFrame::encode_encrypted(&frame, &cipher, &mut encode_buf);
             if let Err(e) = writer.send(bytes).await {
