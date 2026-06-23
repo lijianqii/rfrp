@@ -11,10 +11,16 @@ use tokio::task::{self, JoinHandle};
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-/// Maps proxy name → its per-connection routing table.
+/// Maps proxy_id → its per-connection routing table.
 /// Uses DashMap for lock-free concurrent reads; writes (registration)
 /// happen infrequently so the sharding overhead is negligible.
-type ProxyRoutingMap = Arc<DashMap<Arc<str>, RoutingTable>>;
+/// The numeric key (u32) avoids per-frame string hashing and comparison.
+type ProxyRoutingMap = Arc<DashMap<u32, RoutingTable>>;
+
+/// Maximum number of proxies a single client connection may register.
+/// Prevents a single authenticated client from binding an unbounded
+/// number of ports and exhausting server resources.
+const MAX_PROXIES_PER_CLIENT: usize = 16;
 
 pub async fn run_proxy(client: TcpStream, auth_token: String) {
     if let Err(e) = client.set_nodelay(true) {
@@ -42,7 +48,10 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
 
     // Cache the last looked-up routing table to avoid DashMap lookup
     // on every Data frame.
-    let mut cached_routing: Option<(Arc<str>, RoutingTable)> = None;
+    let mut cached_routing: Option<(u32, RoutingTable)> = None;
+
+    // Next proxy_id to assign during registration
+    let mut next_proxy_id: u32 = 0;
 
     // Reusable buffer for decompression output
     let mut decomp_buf = BytesMut::new();
@@ -72,13 +81,31 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
 
         match frame {
             RfrpFrame::Register(client_info) => {
+                // Enforce per-client proxy limit to prevent resource exhaustion
+                if proxy_tasks.len() >= MAX_PROXIES_PER_CLIENT {
+                    error!(
+                        "Client exceeded max proxy limit ({}), rejecting proxy '{}'",
+                        MAX_PROXIES_PER_CLIENT,
+                        client_info.get_name()
+                    );
+                    // Notify client of rejection
+                    let reject = RfrpFrame::new_reg_ack_frame(&client_info, false, 0);
+                    let _ = tx_channel.send(reject).await;
+                    continue;
+                }
+
                 info!("Client registered proxy: {:?}", client_info.get_name());
-                let name: Arc<str> = Arc::from(client_info.get_name());
+                let proxy_id = next_proxy_id;
+                next_proxy_id = next_proxy_id.wrapping_add(1);
                 let routing: RoutingTable = Arc::new(DashMap::new());
-                proxy_routing.insert(Arc::clone(&name), Arc::clone(&routing));
+                proxy_routing.insert(proxy_id, Arc::clone(&routing));
+
+                // handle_reg_frame binds the port and sends the ACK:
+                // success=true only if the listener bound successfully,
+                // success=false (with proxy_id=0) on bind failure.
                 let tx = tx_channel.clone();
                 let handle = task::spawn(async move {
-                    handle_reg_frame(client_info, tx, routing).await;
+                    handle_reg_frame(client_info, tx, routing, proxy_id).await;
                 });
                 proxy_tasks.push(handle);
             }
@@ -89,19 +116,17 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                 warn!("Unexpected RegisterAck frame received on server");
             }
             RfrpFrame::Data(data_info) => {
-                let proxy_name = &data_info.proxy_name;
+                let proxy_id = data_info.proxy_id;
 
-                // Use cached routing table if proxy name matches, otherwise look up in DashMap
+                // Use cached routing table if proxy_id matches, otherwise look up in DashMap
                 let routing = match &cached_routing {
-                    Some((name, rt)) if name.as_ref() == proxy_name.as_ref() => {
-                        Some(Arc::clone(rt))
-                    }
+                    Some((id, rt)) if *id == proxy_id => Some(Arc::clone(rt)),
                     _ => {
                         let rt = proxy_routing
-                            .get(proxy_name.as_ref())
+                            .get(&proxy_id)
                             .map(|r| Arc::clone(r.value()));
                         if let Some(ref rt) = rt {
-                            cached_routing = Some((Arc::clone(proxy_name), Arc::clone(rt)));
+                            cached_routing = Some((proxy_id, Arc::clone(rt)));
                         }
                         rt
                     }
@@ -123,8 +148,8 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                     }
                     None => {
                         error!(
-                            "No route found for conn {} (proxy '{}'), connection may have been closed",
-                            data_info.conn_id, proxy_name
+                            "No route found for conn {} (proxy_id {}), connection may have been closed",
+                            data_info.conn_id, proxy_id
                         );
                     }
                 }

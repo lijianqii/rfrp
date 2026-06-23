@@ -17,9 +17,9 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 /// Manages persistent connections to internal services, keyed by conn_id.
 type InternalConnSender = mpsc::Sender<Bytes>;
-/// Maps proxy name → its per-proxy internal connection map.
+/// Maps proxy_id → its per-proxy internal connection map.
 /// Uses DashMap for lock-free concurrent reads.
-type ProxyInternalConnMap = Arc<DashMap<Arc<str>, Arc<DashMap<u64, InternalConnSender>>>>;
+type ProxyInternalConnMap = Arc<DashMap<u32, Arc<DashMap<u64, InternalConnSender>>>>;
 
 pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<Cipher>) {
     // Disable Nagle's algorithm for low-latency RDP forwarding
@@ -39,7 +39,8 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
     // Reusable buffer for decompression output
     let mut decomp_buf = BytesMut::new();
 
-    // Phase 1: Register all proxies
+    // Phase 1: Register all proxies and record the proxy_id assigned by the server
+    let proxy_configs: dashmap::DashMap<u32, Arc<ClientInfo>> = dashmap::DashMap::new();
     for client_info in config.get_client_proxy() {
         debug!("Registering client proxy: {}", client_info.get_name());
 
@@ -58,10 +59,12 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
                     Ok(RfrpFrame::RegisterAck(resp)) => {
                         if resp.success {
                             info!(
-                                "Successfully registered proxy '{}' on bind_port {}",
+                                "Successfully registered proxy '{}' (id {}) on bind_port {}",
                                 resp.client.get_name(),
+                                resp.proxy_id,
                                 resp.client.get_bind_port()
                             );
+                            proxy_configs.insert(resp.proxy_id, Arc::new(client_info.clone()));
                         } else {
                             error!(
                                 "Server rejected registration for proxy '{}'",
@@ -108,19 +111,11 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
 
     info!("All proxies registered, entering data forwarding loop");
 
-    // Pre-build proxy name → ClientInfo lookup map for Data frame routing.
-    // Uses Arc<str> keys to match the frame's proxy_name type.
-    let proxy_configs: dashmap::DashMap<Arc<str>, Arc<ClientInfo>> = config
-        .get_client_proxy()
-        .iter()
-        .map(|ci| (Arc::from(ci.get_name()), Arc::new(ci.clone())))
-        .collect();
-
     // Per-proxy internal connection maps so conn_ids don't collide
     let proxy_conns: ProxyInternalConnMap = Arc::new(DashMap::new());
 
-    // Cache the last looked-up proxy name → conns mapping
-    let mut cached_conns: Option<(Arc<str>, Arc<DashMap<u64, InternalConnSender>>)> = None;
+    // Cache the last looked-up proxy_id → conns mapping
+    let mut cached_conns: Option<(u32, Arc<DashMap<u64, InternalConnSender>>)> = None;
 
     // Phase 2: Main loop — forward data between server and internal services
     loop {
@@ -149,33 +144,33 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
             RfrpFrame::Data(data_info) => {
                 let conn_id = data_info.conn_id;
                 let data = data_info.data;
-                let proxy_name = &data_info.proxy_name;
+                let proxy_id = data_info.proxy_id;
 
                 // Look up the ClientInfo from our pre-built config map.
-                let client_info = match proxy_configs.get(proxy_name.as_ref()) {
+                let client_info = match proxy_configs.get(&proxy_id) {
                     Some(ci) => Arc::clone(ci.value()),
                     None => {
-                        error!("Unknown proxy '{}' in data frame", proxy_name);
+                        error!("Unknown proxy_id {} in data frame", proxy_id);
                         continue;
                     }
                 };
 
                 // Get or create the per-proxy connection map (with caching)
                 let conns = match &cached_conns {
-                    Some((name, map)) if name.as_ref() == proxy_name.as_ref() => Arc::clone(map),
+                    Some((id, map)) if *id == proxy_id => Arc::clone(map),
                     _ => {
                         let map: Arc<DashMap<u64, InternalConnSender>> = proxy_conns
-                            .entry(Arc::clone(proxy_name))
+                            .entry(proxy_id)
                             .or_insert_with(|| Arc::new(DashMap::new()))
                             .clone();
-                        cached_conns = Some((Arc::clone(proxy_name), Arc::clone(&map)));
+                        cached_conns = Some((proxy_id, Arc::clone(&map)));
                         map
                     }
                 };
 
                 // Get or create a connection to the internal service.
                 let sender =
-                    get_or_create_internal_conn(&conns, conn_id, &client_info, &tx_to_server).await;
+                    get_or_create_internal_conn(&conns, conn_id, &client_info, &tx_to_server, proxy_id).await;
 
                 match sender {
                     Some(sender) => {
@@ -228,6 +223,7 @@ async fn get_or_create_internal_conn(
     conn_id: u64,
     client_info: &Arc<ClientInfo>,
     tx_to_server: &mpsc::Sender<RfrpFrame>,
+    proxy_id: u32,
 ) -> Option<mpsc::Sender<Bytes>> {
     // Fast path: connection already exists (lock-free DashMap read)
     if let Some(sender) = conns.get(&conn_id) {
@@ -287,8 +283,15 @@ async fn get_or_create_internal_conn(
                 );
                 break;
             }
-            let _ = write_half.flush().await;
+            // Only flush when the channel is drained: lets BufWriter
+            // coalesce back-to-back frames into a single syscall while
+            // still keeping latency low when there's no queued data.
+            if rx.is_empty() {
+                let _ = write_half.flush().await;
+            }
         }
+        // Ensure any buffered data is flushed before the task exits
+        let _ = write_half.flush().await;
         debug!("Write task for proxy '{}' conn {} ended", ci_name, cid);
     });
 
@@ -310,7 +313,7 @@ async fn get_or_create_internal_conn(
                 }
                 Ok(_) => {
                     let data = buf.split().freeze();
-                    let frame = RfrpFrame::new_data_frame(data, &proxy_name, cid);
+                    let frame = RfrpFrame::new_data_frame(data, proxy_id, cid);
                     if tx_to_server.send(frame).await.is_err() {
                         error!(
                             "Failed to send response to server for proxy '{}' conn {}",

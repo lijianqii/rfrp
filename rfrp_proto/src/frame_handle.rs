@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::sync::Semaphore;
 use tokio::task;
 
 use crate::frame_types::RfrpFrame;
@@ -17,10 +18,17 @@ type ConnSender = mpsc::Sender<Bytes>;
 /// Uses DashMap for concurrent access without explicit locking.
 pub type RoutingTable = Arc<DashMap<u64, ConnSender>>;
 
+/// Maximum number of concurrent external connections per proxy.
+/// External users connecting to the exposed proxy port do not need
+/// any token — this cap prevents unauthenticated resource exhaustion
+/// via the exposed ports.
+const MAX_CONCURRENT_EXTERNAL_CONNS: usize = 1024;
+
 pub async fn handle_reg_frame(
     client_info: ClientInfo,
     tx_channel: Sender<RfrpFrame>,
     routing_table: RoutingTable,
+    proxy_id: u32,
 ) {
     let client_info = Arc::new(client_info);
     let proxy_name: Arc<str> = Arc::from(client_info.get_name());
@@ -28,34 +36,41 @@ pub async fn handle_reg_frame(
     {
         Ok(listener) => {
             info!(
-                "Proxy '{}' bound to port {}",
+                "Proxy '{}' (id {}) bound to port {}",
                 proxy_name,
+                proxy_id,
                 client_info.get_bind_port()
             );
+            // Port bound successfully — send success ACK with the assigned proxy_id.
+            // Only now do we confirm registration, so the client knows the proxy
+            // is actually reachable.
+            let ack = RfrpFrame::new_reg_ack_frame(&client_info, true, proxy_id);
+            if tx_channel.send(ack).await.is_err() {
+                error!("Failed to send registration confirmation, channel closed");
+            }
             listener
         }
         Err(e) => {
             error!(
-                "Failed to bind proxy '{}' on port {}: {}",
+                "Failed to bind proxy '{}' (id {}) on port {}: {}",
                 proxy_name,
+                proxy_id,
                 client_info.get_bind_port(),
                 e
             );
-            // Notify client that registration failed
-            let reject = RfrpFrame::new_reg_ack_frame(&client_info, false);
+            // Notify client that registration failed so it doesn't route
+            // data to a non-existent proxy.
+            let reject = RfrpFrame::new_reg_ack_frame(&client_info, false, 0);
             let _ = tx_channel.send(reject).await;
             return;
         }
     };
 
-    // Confirm registration to client
-    let confirm = RfrpFrame::new_reg_ack_frame(&client_info, true);
-    if tx_channel.send(confirm).await.is_err() {
-        error!("Failed to send registration confirmation, channel closed");
-        return;
-    }
-
     let mut next_conn_id: u64 = 0;
+
+    // Cap concurrent external connections to prevent unauthenticated
+    // resource exhaustion via the exposed proxy port.
+    let ext_conn_limit = Arc::new(Semaphore::new(MAX_CONCURRENT_EXTERNAL_CONNS));
 
     loop {
         let (remote, peer) = match listener.accept().await {
@@ -70,8 +85,8 @@ pub async fn handle_reg_frame(
         next_conn_id = next_conn_id.wrapping_add(1);
 
         info!(
-            "Proxy '{}': accepted external conn {} from {}",
-            proxy_name, conn_id, peer
+            "Proxy '{}' (id {}): accepted external conn {} from {}",
+            proxy_name, proxy_id, conn_id, peer
         );
 
         // Disable Nagle's algorithm for low-latency RDP forwarding
@@ -89,12 +104,29 @@ pub async fn handle_reg_frame(
         // Register this connection in the routing table
         routing.insert(conn_id, tx_to_remote);
 
+        // Acquire a permit for this external connection. The read task holds
+        // the permit for the connection lifetime; when the peer disconnects
+        // the read task exits, the permit is released, and the write task
+        // drains shortly after (its rx channel closes).
+        let conn_permit = match ext_conn_limit.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                warn!(
+                    "Proxy '{}' (id {}): connection limit semaphore closed, rejecting conn {}",
+                    proxy_name, proxy_id, conn_id
+                );
+                routing.remove(&conn_id);
+                continue;
+            }
+        };
+
         // Spawn read task: external user → client
         let tx = tx_channel.clone();
         let proxy_name_read = Arc::clone(&proxy_name);
         let cid = conn_id;
         let routing_cleanup = routing.clone();
         task::spawn(async move {
+            let _permit = conn_permit; // hold permit for task lifetime
             let mut buf = BytesMut::with_capacity(65536);
             loop {
                 match remote_read.read_buf(&mut buf).await {
@@ -107,7 +139,7 @@ pub async fn handle_reg_frame(
                     }
                     Ok(_) => {
                         let data = buf.split().freeze();
-                        let frame = RfrpFrame::new_data_frame(data, &proxy_name_read, cid);
+                        let frame = RfrpFrame::new_data_frame(data, proxy_id, cid);
                         if tx.send(frame).await.is_err() {
                             error!(
                                 "Proxy '{}' conn {}: failed to send data frame to client, channel closed",
@@ -148,9 +180,15 @@ pub async fn handle_reg_frame(
                     );
                     break;
                 }
-                // Flush after each complete message to ensure timely delivery
-                let _ = remote_write.flush().await;
+                // Only flush when the channel is drained: lets BufWriter
+                // coalesce back-to-back frames into a single syscall while
+                // still keeping latency low when there's no queued data.
+                if rx_to_remote.is_empty() {
+                    let _ = remote_write.flush().await;
+                }
             }
+            // Ensure any buffered data is flushed before the task exits
+            let _ = remote_write.flush().await;
             info!(
                 "Proxy '{}' conn {}: write task ended",
                 proxy_name_write, cid

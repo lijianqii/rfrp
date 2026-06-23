@@ -1,7 +1,6 @@
 use crate::config_info::base_info_ops::BaseInfoGetter;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RunningMode {
@@ -19,11 +18,10 @@ pub struct ControlInfo {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DataInfo {
     pub conn_id: u64,
-    /// Proxy name — used to look up routing on the server side
-    /// and client config on the client side. Uses `Arc<str>` so that
-    /// cloning per frame is a cheap reference count bump instead of
-    /// a heap allocation. Serialized as a plain string on the wire.
-    pub proxy_name: Arc<str>,
+    /// Numeric proxy ID assigned by the server during registration.
+    /// Replaces the per-frame string `proxy_name` to save bandwidth:
+    /// a u32 is 4 bytes on the wire vs. a variable-length string per frame.
+    pub proxy_id: u32,
     pub data: Bytes,
 }
 
@@ -61,6 +59,10 @@ pub struct ClientInfo {
 pub struct RegisterResponse {
     pub client: ClientInfo,
     pub success: bool,
+    /// Numeric ID assigned by the server to this proxy. The client must
+    /// include this `proxy_id` in all subsequent Data frames instead of
+    /// the proxy name string, saving per-frame bandwidth.
+    pub proxy_id: u32,
 }
 
 impl ConfigInfo {

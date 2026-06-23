@@ -1,1 +1,3 @@
 /target
+# Keep example configs in git, but ignore real configs with secrets.
+config/*-local.json

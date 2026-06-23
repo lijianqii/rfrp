@@ -5,7 +5,6 @@ use rfrp_config::config_info::base_types::RegisterResponse;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RfrpFrame {
@@ -16,21 +15,22 @@ pub enum RfrpFrame {
 }
 
 impl RfrpFrame {
-    /// Create a Data frame. Uses `proxy_name` instead of the full `ClientInfo`
-    /// to avoid redundant serialization of unchanging data every frame.
-    /// `proxy_name` is `Arc<str>` so cloning is a cheap ref-count bump.
-    pub fn new_data_frame(data: Bytes, proxy_name: &Arc<str>, conn_id: u64) -> Self {
+    /// Create a Data frame. Uses the numeric `proxy_id` (assigned during
+    /// registration) instead of the proxy name string to minimize per-frame
+    /// wire overhead — a u32 is 4 bytes vs. a variable-length string.
+    pub fn new_data_frame(data: Bytes, proxy_id: u32, conn_id: u64) -> Self {
         RfrpFrame::Data(DataInfo {
             conn_id,
-            proxy_name: Arc::clone(proxy_name),
+            proxy_id,
             data,
         })
     }
 
-    pub fn new_reg_ack_frame(client_info: &ClientInfo, success: bool) -> Self {
+    pub fn new_reg_ack_frame(client_info: &ClientInfo, success: bool, proxy_id: u32) -> Self {
         RfrpFrame::RegisterAck(RegisterResponse {
             client: client_info.clone(),
             success,
+            proxy_id,
         })
     }
 }
