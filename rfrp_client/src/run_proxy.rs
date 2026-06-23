@@ -36,8 +36,11 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
         Arc::clone(&cipher),
     );
 
-    // Reusable buffer for decompression output
-    let mut decomp_buf = BytesMut::new();
+    // Reusable buffer and decompressor for the hot decode path.
+    // The Decompress struct keeps its internal zlib state across frames,
+    // avoiding a ~280KB allocation/deallocation on every frame.
+    let mut decomp_buf = Vec::new();
+    let mut decompress = flate2::Decompress::new(false);
 
     // Phase 1: Register all proxies and record the proxy_id assigned by the server
     let proxy_configs: dashmap::DashMap<u32, Arc<ClientInfo>> = dashmap::DashMap::new();
@@ -55,7 +58,7 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
         match reader.next().await {
             Some(Ok(resp_bytes)) => {
                 let mut resp_buf = resp_bytes;
-                match RfrpFrame::decode_encrypted_bytes_mut(&mut resp_buf, &cipher, &mut decomp_buf) {
+                match RfrpFrame::decode_encrypted_bytes_mut(&mut resp_buf, &cipher, &mut decomp_buf, &mut decompress) {
                     Ok(RfrpFrame::RegisterAck(resp)) => {
                         if resp.success {
                             info!(
@@ -132,7 +135,7 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
         };
 
         // Decrypt and decode in-place on the codec's BytesMut — no copy needed
-        let frame = match RfrpFrame::decode_encrypted_bytes_mut(&mut bytes, &cipher, &mut decomp_buf) {
+        let frame = match RfrpFrame::decode_encrypted_bytes_mut(&mut bytes, &cipher, &mut decomp_buf, &mut decompress) {
             Ok(frame) => frame,
             Err(e) => {
                 error!("Failed to decode frame: {}", e);

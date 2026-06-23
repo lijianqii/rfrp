@@ -1,4 +1,3 @@
-use bytes::BytesMut;
 use dashmap::DashMap;
 use log::{error, info, warn};
 use rfrp_proto::coalesce;
@@ -53,8 +52,11 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
     // Next proxy_id to assign during registration
     let mut next_proxy_id: u32 = 0;
 
-    // Reusable buffer for decompression output
-    let mut decomp_buf = BytesMut::new();
+    // Reusable buffer and decompressor for the hot decode path.
+    // The Decompress struct keeps its internal zlib state across frames,
+    // avoiding a ~280KB allocation/deallocation on every frame.
+    let mut decomp_buf = Vec::new();
+    let mut decompress = flate2::Decompress::new(false);
 
     // Main read loop: receive frames from the client
     loop {
@@ -70,8 +72,8 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
             }
         };
 
-        // Decrypt and decode in-place on the codec's BytesMut — no copy needed
-        let frame = match RfrpFrame::decode_encrypted_bytes_mut(&mut bytes, &cipher, &mut decomp_buf) {
+        // Decrypt and decode in-place on the codec's buffer — no copy needed
+        let frame = match RfrpFrame::decode_encrypted_bytes_mut(&mut bytes, &cipher, &mut decomp_buf, &mut decompress) {
             Ok(frame) => frame,
             Err(e) => {
                 error!("Failed to decode frame from client: {}", e);
