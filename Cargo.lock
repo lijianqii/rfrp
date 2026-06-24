@@ -851,6 +851,7 @@ dependencies = [
  "rfrp_config",
  "rmp-serde",
  "serde",
+ "serde_json",
  "sha2",
  "tokio",
  "tokio-util",
