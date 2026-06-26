@@ -31,9 +31,8 @@ fn diag_compress_decompress_roundtrip() {
     let original: Vec<u8> = (0..200u32).flat_map(|i| i.to_le_bytes()).collect();
 
     let mut dst = BytesMut::with_capacity(65536);
-    let mut compress_tmp = Vec::with_capacity(65536);
-    let mut compress = flate2::Compress::new(Compression::best(), false);
-    compress::compress_into_bytes_mut(&original, &mut dst, &mut compress_tmp, &mut compress);
+    let mut compress = flate2::Compress::new(Compression::fast(), false);
+    compress::compress_into_bytes_mut(&original, &mut dst, &mut compress);
     let compressed = dst.split().freeze();
 
     let mut decomp_buf = Vec::new();
@@ -83,9 +82,8 @@ fn roundtrip_register_frame() {
     let frame = RfrpFrame::Register(make_client_info());
 
     let mut buf = BytesMut::with_capacity(65536);
-    let mut compress_tmp = Vec::with_capacity(65536);
-    let mut compress = flate2::Compress::new(Compression::best(), false);
-    let bytes = RfrpFrame::encode_encrypted(&frame, &cipher, &mut buf, &mut compress, &mut compress_tmp);
+    let mut compress = flate2::Compress::new(Compression::fast(), false);
+    let bytes = RfrpFrame::encode_encrypted(&frame, &cipher, &mut buf, &mut compress);
 
     // Simulate what the server does: receive BytesMut from the codec.
     let mut recv = BytesMut::from(&bytes[..]);
@@ -110,8 +108,7 @@ fn roundtrip_multiple_frames_reuse_compressor() {
     // of "failed to fill whole buffer" on the server).
     let cipher = make_cipher();
     let mut buf = BytesMut::with_capacity(65536);
-    let mut compress_tmp = Vec::with_capacity(65536);
-    let mut compress = flate2::Compress::new(Compression::best(), false);
+    let mut compress = flate2::Compress::new(Compression::fast(), false);
     let mut decomp_buf = Vec::new();
     let mut decompress = flate2::Decompress::new(false);
 
@@ -121,7 +118,7 @@ fn roundtrip_multiple_frames_reuse_compressor() {
             proxy_id: i,
             data: bytes::Bytes::from(format!("payload-{}", i)),
         });
-        let bytes = RfrpFrame::encode_encrypted(&frame, &cipher, &mut buf, &mut compress, &mut compress_tmp);
+        let bytes = RfrpFrame::encode_encrypted(&frame, &cipher, &mut buf, &mut compress);
         let mut recv = BytesMut::from(&bytes[..]);
         let decoded = RfrpFrame::decode_encrypted_bytes_mut(&mut recv, &cipher, &mut decomp_buf, &mut decompress)
             .unwrap_or_else(|_| panic!("decode failed on frame {}", i));

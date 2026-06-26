@@ -28,15 +28,13 @@ pub fn spawn_write_task(
     let handle = tokio::task::spawn(async move {
         let mut writer = writer;
         let mut encode_buf = BytesMut::with_capacity(65536);
-        let mut compress_tmp = Vec::with_capacity(65536);
-        let mut compress = flate2::Compress::new(Compression::best(), false);
+        let mut compress = flate2::Compress::new(Compression::fast(), false);
         while let Some(frame) = rx.recv().await {
             let bytes = RfrpFrame::encode_encrypted(
                 &frame,
                 &cipher,
                 &mut encode_buf,
                 &mut compress,
-                &mut compress_tmp,
             );
             if let Err(e) = writer.send(bytes).await {
                 error!("Failed to send encrypted frame: {}", e);

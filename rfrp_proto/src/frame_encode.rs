@@ -30,7 +30,7 @@ impl RfrpFrame {
     ///
     /// Uses a reusable `BytesMut` buffer and a reusable `Compress` struct to minimize
     /// allocations on the hot path. The `Compress` object keeps its internal zlib state
-    /// (~280KB at level 9) across calls, avoiding per-frame alloc/free.
+    /// across calls, avoiding per-frame alloc/free.
     ///
     /// Pipeline: MessagePack → DEFLATE compress → AES-256-GCM encrypt
     /// Output format: [compressed ciphertext][nonce (12B)][tag (16B)]
@@ -39,7 +39,6 @@ impl RfrpFrame {
         cipher: &Cipher,
         buf: &mut BytesMut,
         compress: &mut flate2::Compress,
-        compress_tmp: &mut Vec<u8>,
     ) -> Bytes {
         buf.clear();
         {
@@ -47,10 +46,8 @@ impl RfrpFrame {
             rmp_serde::encode::write(&mut writer, object)
                 .expect("Failed to encode RfrpFrame");
         }
-        // Split off the serialized payload (zero-copy), then compress
-        // directly back into the now-empty buffer.
         let serialized = buf.split();
-        compress::compress_into_bytes_mut(&serialized, buf, compress_tmp, compress);
+        compress::compress_into_bytes_mut(&serialized, buf, compress);
         cipher.encrypt_in_place_bytes_mut(buf);
         buf.split().freeze()
     }

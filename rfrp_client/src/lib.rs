@@ -61,7 +61,7 @@ pub async fn rfrp_client(config: Arc<ConfigInfo>) {
 
 /// Calculate reconnection delay with exponential backoff, capped at MAX_RECONNECT_DELAY.
 fn calc_reconnect_delay(attempt: u32) -> Duration {
-    let seconds = (INITIAL_RECONNECT_DELAY as u64)
+    let seconds = INITIAL_RECONNECT_DELAY
         .saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)))
         .min(MAX_RECONNECT_DELAY);
     Duration::from_secs(seconds)

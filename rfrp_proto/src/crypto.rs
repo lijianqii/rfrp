@@ -72,7 +72,7 @@ impl Cipher {
     pub fn encrypt_in_place(&self, buf: &mut Vec<u8>) {
         let (nonce_bytes, tag) = self.encrypt_inner(buf);
         buf.extend_from_slice(&nonce_bytes);
-        buf.extend_from_slice(&*tag);
+        buf.extend_from_slice(&tag);
     }
 
     /// Encrypt data in-place on a `BytesMut`.
@@ -82,7 +82,7 @@ impl Cipher {
     pub fn encrypt_in_place_bytes_mut(&self, buf: &mut BytesMut) {
         let (nonce_bytes, tag) = self.encrypt_inner(buf);
         buf.extend_from_slice(&nonce_bytes);
-        buf.extend_from_slice(&*tag);
+        buf.extend_from_slice(&tag);
     }
 
     /// Decrypt ciphertext that was produced by `encrypt`.

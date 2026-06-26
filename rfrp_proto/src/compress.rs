@@ -6,23 +6,18 @@ use flate2::{Compress, Decompress, FlushCompress, FlushDecompress, Status};
 /// The `Compress` object is reused across calls to avoid allocating/freeing
 /// the internal zlib state (~280KB at level 9) on every frame.
 ///
-/// `compress_tmp` is a reusable scratch buffer for compression output. The
-/// compressed bytes are placed in `dst` (cleared first).
+/// Compressed output is written directly into `dst` (cleared first).
 pub fn compress_into_bytes_mut(
     data: &[u8],
     dst: &mut BytesMut,
-    compress_tmp: &mut Vec<u8>,
     compress: &mut Compress,
 ) {
     compress.reset();
     dst.clear();
-    compress_tmp.clear();
 
-    // NOTE: `Compress::compress_vec` only writes to the *spare capacity* of the
-    // output Vec and never grows it, so a single call silently truncates the
-    // output once it exceeds the reserved capacity. Drive the compression in a
-    // loop with a fixed stack buffer instead, appending each produced chunk to
-    // `compress_tmp` (which grows on demand) until the whole stream is flushed.
+    // Drive the compression in a loop with a fixed stack buffer, appending
+    // each produced chunk directly to `dst` (which grows on demand) until the
+    // whole stream is flushed.
     let mut input = data;
     let mut chunk = [0u8; 8192];
     loop {
@@ -33,18 +28,15 @@ pub fn compress_into_bytes_mut(
             .expect("Compression failed");
         let in_consumed = (compress.total_in() - before_in) as usize;
         let out_written = (compress.total_out() - before_out) as usize;
-        compress_tmp.extend_from_slice(&chunk[..out_written]);
+        dst.extend_from_slice(&chunk[..out_written]);
         input = &input[in_consumed..];
         if status == Status::StreamEnd {
             break;
         }
         if in_consumed == 0 && out_written == 0 {
-            // Should not happen with FlushCompress::Finish and valid input,
-            // but guard against an infinite loop.
             panic!("Compression stalled with no progress");
         }
     }
-    dst.extend_from_slice(compress_tmp);
 }
 
 /// Decompress data using DEFLATE (zlib format) with a reusable `Decompress` struct.
