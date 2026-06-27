@@ -9,18 +9,17 @@ license = "Apache-2.0"
 authors = ["lijianqii"]
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
 log = "0.4.28"
 serde_json = "1"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
-tokio-util = { version = "0.7.17", features = ["full"] }
-tokio-stream = { version = "0.1.17", features = ["full"] }
+tokio-util = { version = "0.7.17", features = ["codec"] }
+tokio-stream = { version = "0.1.17" }
 futures = { version = "0.3.32" }
 bytes = { version = "1", features = ["serde"] }
 dashmap = "6"
 aes-gcm = "0.10"
 sha2 = "0.10"
-rand = "0.8"
 rmp-serde = "1"
 flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
 
@@ -30,3 +29,5 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+# Explicitly disable overflow checks (default in release, but declared for clarity).
+overflow-checks = false

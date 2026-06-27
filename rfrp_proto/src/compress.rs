@@ -7,11 +7,7 @@ use flate2::{Compress, Decompress, FlushCompress, FlushDecompress, Status};
 /// the internal zlib state (~280KB at level 9) on every frame.
 ///
 /// Compressed output is written directly into `dst` (cleared first).
-pub fn compress_into_bytes_mut(
-    data: &[u8],
-    dst: &mut BytesMut,
-    compress: &mut Compress,
-) {
+pub fn compress_into_bytes_mut(data: &[u8], dst: &mut BytesMut, compress: &mut Compress) {
     compress.reset();
     dst.clear();
 

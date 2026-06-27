@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use rfrp_proto::coalesce;
 use rfrp_proto::crypto::{self, Cipher};
 use rfrp_proto::frame_handle::{RoutingTable, handle_reg_frame};
@@ -7,6 +7,7 @@ use rfrp_proto::frame_types::RfrpFrame;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::task::{self, JoinHandle};
+use tokio::time::Instant;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
@@ -20,6 +21,14 @@ type ProxyRoutingMap = Arc<DashMap<u32, RoutingTable>>;
 /// Prevents a single authenticated client from binding an unbounded
 /// number of ports and exhausting server resources.
 const MAX_PROXIES_PER_CLIENT: usize = 16;
+
+/// If no frame is received from the client within this duration, the
+/// connection is considered dead and will be closed. This catches
+/// half-open connections (e.g. NAT timeout, network partition) where
+/// TCP may not detect the failure for a long time. The client sends a
+/// ping every `PING_INTERVAL` (defined in rfrp_client) so this should
+/// be comfortably larger than that interval.
+const KEEPALIVE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(90);
 
 pub async fn run_proxy(client: TcpStream, auth_token: String) {
     if let Err(e) = client.set_nodelay(true) {
@@ -58,22 +67,36 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
     let mut decomp_buf = Vec::new();
     let mut decompress = flate2::Decompress::new(false);
 
-    // Main read loop: receive frames from the client
+    // Main read loop: receive frames from the client with keepalive timeout.
+    // If no frame arrives within KEEPALIVE_TIMEOUT the connection is closed.
     loop {
-        let mut bytes = match reader.next().await {
-            Some(Ok(bytes)) => bytes,
-            Some(Err(e)) => {
-                error!("Read error from client: {}", e);
-                break;
-            }
-            None => {
-                info!("Client closed connection");
+        let deadline = Instant::now() + KEEPALIVE_TIMEOUT;
+        let mut bytes = tokio::select! {
+            biased;
+            result = reader.next() => match result {
+                Some(Ok(bytes)) => bytes,
+                Some(Err(e)) => {
+                    error!("Read error from client: {}", e);
+                    break;
+                }
+                None => {
+                    info!("Client closed connection");
+                    break;
+                }
+            },
+            _ = tokio::time::sleep_until(deadline) => {
+                warn!("Keepalive timeout: no frame from client in {:?}, closing connection", KEEPALIVE_TIMEOUT);
                 break;
             }
         };
 
         // Decrypt and decode in-place on the codec's buffer — no copy needed
-        let frame = match RfrpFrame::decode_encrypted_bytes_mut(&mut bytes, &cipher, &mut decomp_buf, &mut decompress) {
+        let frame = match RfrpFrame::decode_encrypted_bytes_mut(
+            &mut bytes,
+            &cipher,
+            &mut decomp_buf,
+            &mut decompress,
+        ) {
             Ok(frame) => frame,
             Err(e) => {
                 error!("Failed to decode frame from client: {}", e);
@@ -112,7 +135,19 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                 proxy_tasks.push(handle);
             }
             RfrpFrame::Control(control_info) => {
-                info!("Control info: {:?}", control_info);
+                if control_info.command == "ping" {
+                    debug!("Received ping from client, replying pong");
+                    let pong = RfrpFrame::new_pong_frame();
+                    if let Err(e) = tx_channel.send(pong).await {
+                        error!("Failed to send pong: {}", e);
+                        break;
+                    }
+                } else if control_info.command == "pong" {
+                    // Server doesn't initiate pings, so a pong is unexpected.
+                    debug!("Received unexpected pong from client");
+                } else {
+                    info!("Control info: {:?}", control_info);
+                }
             }
             RfrpFrame::RegisterAck(_) => {
                 warn!("Unexpected RegisterAck frame received on server");
@@ -124,9 +159,7 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
                 let routing = match &cached_routing {
                     Some((id, rt)) if *id == proxy_id => Some(Arc::clone(rt)),
                     _ => {
-                        let rt = proxy_routing
-                            .get(&proxy_id)
-                            .map(|r| Arc::clone(r.value()));
+                        let rt = proxy_routing.get(&proxy_id).map(|r| Arc::clone(r.value()));
                         if let Some(ref rt) = rt {
                             cached_routing = Some((proxy_id, Arc::clone(rt)));
                         }

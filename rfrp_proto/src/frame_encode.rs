@@ -43,8 +43,7 @@ impl RfrpFrame {
         buf.clear();
         {
             let mut writer = BytesMutWriter(&mut *buf);
-            rmp_serde::encode::write(&mut writer, object)
-                .expect("Failed to encode RfrpFrame");
+            rmp_serde::encode::write(&mut writer, object).expect("Failed to encode RfrpFrame");
         }
         let serialized = buf.split();
         compress::compress_into_bytes_mut(&serialized, buf, compress);

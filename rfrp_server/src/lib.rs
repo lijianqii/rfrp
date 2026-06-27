@@ -54,7 +54,10 @@ pub async fn rfrp_server(config: Arc<ConfigInfo>) {
             let _permit = match permit.acquire_owned().await {
                 Ok(p) => p,
                 Err(_) => {
-                    warn!("Connection limit semaphore closed, rejecting connection from {}", peer);
+                    warn!(
+                        "Connection limit semaphore closed, rejecting connection from {}",
+                        peer
+                    );
                     return;
                 }
             };

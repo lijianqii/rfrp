@@ -33,4 +33,31 @@ impl RfrpFrame {
             proxy_id,
         })
     }
+
+    /// Create a heartbeat ping frame. The client sends this periodically;
+    /// the server must reply with a pong frame.
+    pub fn new_ping_frame() -> Self {
+        RfrpFrame::Control(ControlInfo {
+            command: "ping".to_string(),
+            args: Vec::new(),
+        })
+    }
+
+    /// Create a heartbeat pong frame. Sent by the server in response to a ping.
+    pub fn new_pong_frame() -> Self {
+        RfrpFrame::Control(ControlInfo {
+            command: "pong".to_string(),
+            args: Vec::new(),
+        })
+    }
+
+    /// Returns true if this Control frame carries a "ping" heartbeat.
+    pub fn is_ping(&self) -> bool {
+        matches!(self, RfrpFrame::Control(c) if c.command == "ping")
+    }
+
+    /// Returns true if this Control frame carries a "pong" heartbeat.
+    pub fn is_pong(&self) -> bool {
+        matches!(self, RfrpFrame::Control(c) if c.command == "pong")
+    }
 }

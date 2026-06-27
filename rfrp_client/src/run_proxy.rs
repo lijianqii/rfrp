@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task;
+use tokio::time::Instant;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
@@ -20,6 +21,15 @@ type InternalConnSender = mpsc::Sender<Bytes>;
 /// Maps proxy_id → its per-proxy internal connection map.
 /// Uses DashMap for lock-free concurrent reads.
 type ProxyInternalConnMap = Arc<DashMap<u32, Arc<DashMap<u64, InternalConnSender>>>>;
+
+/// Interval at which the client sends heartbeat ping frames to the server.
+const PING_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(30);
+
+/// If no frame (data or pong) is received from the server within this
+/// duration, the connection is considered dead and the client will
+/// reconnect. This is 3× the ping interval to tolerate missed pings
+/// and network jitter.
+const KEEPALIVE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(90);
 
 pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<Cipher>) {
     // Disable Nagle's algorithm for low-latency RDP forwarding
@@ -42,7 +52,9 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
     let mut decomp_buf = Vec::new();
     let mut decompress = flate2::Decompress::new(false);
 
-    // Phase 1: Register all proxies and record the proxy_id assigned by the server
+    // Phase 1: Register all proxies and record the proxy_id assigned by the server.
+    // Each registration response must arrive within KEEPALIVE_TIMEOUT, otherwise
+    // the connection is treated as dead.
     let proxy_configs: dashmap::DashMap<u32, Arc<ClientInfo>> = dashmap::DashMap::new();
     for client_info in config.get_client_proxy() {
         debug!("Registering client proxy: {}", client_info.get_name());
@@ -54,11 +66,17 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
             return;
         }
 
-        // Wait for registration confirmation from server
-        match reader.next().await {
-            Some(Ok(resp_bytes)) => {
+        // Wait for registration confirmation from server (with keepalive timeout)
+        let next_result = tokio::time::timeout(KEEPALIVE_TIMEOUT, reader.next()).await;
+        match next_result {
+            Ok(Some(Ok(resp_bytes))) => {
                 let mut resp_buf = resp_bytes;
-                match RfrpFrame::decode_encrypted_bytes_mut(&mut resp_buf, &cipher, &mut decomp_buf, &mut decompress) {
+                match RfrpFrame::decode_encrypted_bytes_mut(
+                    &mut resp_buf,
+                    &cipher,
+                    &mut decomp_buf,
+                    &mut decompress,
+                ) {
                     Ok(RfrpFrame::RegisterAck(resp)) => {
                         if resp.success {
                             info!(
@@ -94,7 +112,7 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
                     }
                 }
             }
-            Some(Err(e)) => {
+            Ok(Some(Err(e))) => {
                 error!(
                     "Read error during registration for '{}': {}",
                     client_info.get_name(),
@@ -102,10 +120,18 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
                 );
                 return;
             }
-            None => {
+            Ok(None) => {
                 error!(
                     "Server closed connection during registration for '{}'",
                     client_info.get_name()
+                );
+                return;
+            }
+            Err(_) => {
+                error!(
+                    "Keepalive timeout during registration for '{}': no response in {:?}",
+                    client_info.get_name(),
+                    KEEPALIVE_TIMEOUT
                 );
                 return;
             }
@@ -120,22 +146,59 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
     // Cache the last looked-up proxy_id → conns mapping
     let mut cached_conns: Option<(u32, Arc<DashMap<u64, InternalConnSender>>)> = None;
 
-    // Phase 2: Main loop — forward data between server and internal services
-    loop {
-        let mut bytes = match reader.next().await {
-            Some(Ok(bytes)) => bytes,
-            Some(Err(e)) => {
-                error!("Read error from server: {}", e);
+    // Spawn a heartbeat task that sends a ping frame every PING_INTERVAL.
+    // The task exits when the write channel (tx_to_server) is closed,
+    // which happens when the main loop breaks on disconnect.
+    //
+    // MissedTickBehavior::Delay ensures that if the runtime is busy and
+    // a tick is missed, the next ping fires one full interval later
+    // rather than bursting multiple pings back-to-back.
+    let ping_tx = tx_to_server.clone();
+    let ping_handle = task::spawn(async move {
+        let mut interval = tokio::time::interval(PING_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await; // skip the immediate first tick
+        loop {
+            interval.tick().await;
+            if ping_tx.send(RfrpFrame::new_ping_frame()).await.is_err() {
+                // Channel closed — main loop has ended, stop pinging
                 break;
             }
-            None => {
-                info!("Server closed connection");
+            debug!("Sent heartbeat ping to server");
+        }
+    });
+
+    // Phase 2: Main loop — forward data between server and internal services.
+    // Uses tokio::select! to race the read against a keepalive timeout.
+    // Any frame received (data or pong) resets the timeout.
+    loop {
+        let deadline = Instant::now() + KEEPALIVE_TIMEOUT;
+        let mut bytes = tokio::select! {
+            biased;
+            result = reader.next() => match result {
+                Some(Ok(bytes)) => bytes,
+                Some(Err(e)) => {
+                    error!("Read error from server: {}", e);
+                    break;
+                }
+                None => {
+                    info!("Server closed connection");
+                    break;
+                }
+            },
+            _ = tokio::time::sleep_until(deadline) => {
+                warn!("Keepalive timeout: no frame from server in {:?}, reconnecting", KEEPALIVE_TIMEOUT);
                 break;
             }
         };
 
         // Decrypt and decode in-place on the codec's BytesMut — no copy needed
-        let frame = match RfrpFrame::decode_encrypted_bytes_mut(&mut bytes, &cipher, &mut decomp_buf, &mut decompress) {
+        let frame = match RfrpFrame::decode_encrypted_bytes_mut(
+            &mut bytes,
+            &cipher,
+            &mut decomp_buf,
+            &mut decompress,
+        ) {
             Ok(frame) => frame,
             Err(e) => {
                 error!("Failed to decode frame: {}", e);
@@ -172,8 +235,14 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
                 };
 
                 // Get or create a connection to the internal service.
-                let sender =
-                    get_or_create_internal_conn(&conns, conn_id, &client_info, &tx_to_server, proxy_id).await;
+                let sender = get_or_create_internal_conn(
+                    &conns,
+                    conn_id,
+                    &client_info,
+                    &tx_to_server,
+                    proxy_id,
+                )
+                .await;
 
                 match sender {
                     Some(sender) => {
@@ -196,7 +265,11 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
                 }
             }
             RfrpFrame::Control(control_info) => {
-                debug!("Received control frame: {:?}", control_info);
+                if control_info.command == "pong" {
+                    debug!("Received heartbeat pong from server");
+                } else {
+                    debug!("Received control frame: {:?}", control_info);
+                }
             }
             RfrpFrame::Register(client) => {
                 warn!(
@@ -215,6 +288,8 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
 
     // Abort the write task so it doesn't hang
     _write_handle.abort();
+    // Abort the heartbeat task
+    ping_handle.abort();
     info!("Client proxy session ended");
 }
 

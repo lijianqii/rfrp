@@ -30,12 +30,8 @@ pub fn spawn_write_task(
         let mut encode_buf = BytesMut::with_capacity(65536);
         let mut compress = flate2::Compress::new(Compression::fast(), false);
         while let Some(frame) = rx.recv().await {
-            let bytes = RfrpFrame::encode_encrypted(
-                &frame,
-                &cipher,
-                &mut encode_buf,
-                &mut compress,
-            );
+            let bytes =
+                RfrpFrame::encode_encrypted(&frame, &cipher, &mut encode_buf, &mut compress);
             if let Err(e) = writer.send(bytes).await {
                 error!("Failed to send encrypted frame: {}", e);
                 break;
