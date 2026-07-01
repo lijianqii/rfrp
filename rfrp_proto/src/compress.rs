@@ -1,19 +1,12 @@
 use bytes::BytesMut;
 use flate2::{Compress, Decompress, FlushCompress, FlushDecompress, Status};
 
-/// Compress data using DEFLATE (zlib format) with a reusable `Compress` struct.
-///
-/// The `Compress` object is reused across calls to avoid allocating/freeing
-/// the internal zlib state (~280KB at level 9) on every frame.
-///
-/// Compressed output is written directly into `dst` (cleared first).
+pub const MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024;
+
 pub fn compress_into_bytes_mut(data: &[u8], dst: &mut BytesMut, compress: &mut Compress) {
     compress.reset();
     dst.clear();
 
-    // Drive the compression in a loop with a fixed stack buffer, appending
-    // each produced chunk directly to `dst` (which grows on demand) until the
-    // whole stream is flushed.
     let mut input = data;
     let mut chunk = [0u8; 8192];
     loop {
@@ -35,13 +28,6 @@ pub fn compress_into_bytes_mut(data: &[u8], dst: &mut BytesMut, compress: &mut C
     }
 }
 
-/// Decompress data using DEFLATE (zlib format) with a reusable `Decompress` struct.
-///
-/// The `Decompress` object is reused across calls to avoid allocating/freeing
-/// the internal zlib state on every frame.
-///
-/// Output is appended into `dst` (cleared first). The caller reuses `dst`
-/// across calls to minimize allocations.
 pub fn decompress_into_vec(
     data: &[u8],
     dst: &mut Vec<u8>,
@@ -50,12 +36,6 @@ pub fn decompress_into_vec(
     decompress.reset(false);
     dst.clear();
 
-    // NOTE: `Decompress::decompress_vec` only writes to the *spare capacity* of
-    // `dst` and never grows it. When `dst` starts empty (capacity 0) the call
-    // produces zero bytes — silently dropping the entire payload, which broke
-    // the whole tunnel (every frame decoded to empty msgpack). Drive the
-    // decompression in a loop with a fixed stack buffer instead, appending each
-    // produced chunk to `dst` (which grows on demand) until the stream ends.
     let mut input = data;
     let mut chunk = [0u8; 8192];
     loop {
@@ -67,12 +47,17 @@ pub fn decompress_into_vec(
         let in_consumed = (decompress.total_in() - before_in) as usize;
         let out_written = (decompress.total_out() - before_out) as usize;
         dst.extend_from_slice(&chunk[..out_written]);
+        if dst.len() > MAX_DECOMPRESSED_SIZE {
+            return Err(format!(
+                "Decompression bomb detected: output exceeded {} bytes",
+                MAX_DECOMPRESSED_SIZE
+            ));
+        }
         input = &input[in_consumed..];
         if status == Status::StreamEnd {
             break;
         }
         if in_consumed == 0 && out_written == 0 {
-            // No progress: the input stream is incomplete or truncated.
             return Err("Decompression stalled: incomplete input stream".to_string());
         }
     }

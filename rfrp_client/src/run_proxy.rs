@@ -5,8 +5,9 @@ use log::{debug, error, info, warn};
 use rfrp_config::config_info::base_info_ops::BaseInfoGetter;
 use rfrp_config::config_info::base_types::{ClientInfo, ConfigInfo};
 use rfrp_proto::coalesce::{self};
-use rfrp_proto::crypto::Cipher;
 use rfrp_proto::frame_types::RfrpFrame;
+use rfrp_proto::handshake;
+use rfrp_proto::make_length_delimited_codec;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::TcpStream;
@@ -14,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio::task;
 use tokio::time::Instant;
 use tokio_stream::StreamExt;
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use tokio_util::codec::{FramedRead, FramedWrite};
 
 /// Manages persistent connections to internal services, keyed by conn_id.
 type InternalConnSender = mpsc::Sender<Bytes>;
@@ -31,18 +32,26 @@ const PING_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(30
 /// and network jitter.
 const KEEPALIVE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(90);
 
-pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<Cipher>) {
-    // Disable Nagle's algorithm for low-latency RDP forwarding
+pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>) {
     if let Err(e) = remote.set_nodelay(true) {
         warn!("Failed to set TCP_NODELAY on server socket: {}", e);
     }
 
+    let auth_token = config.get_server().get_auth_token();
+    let (remote, cipher) = match handshake::client_handshake(remote, auth_token).await {
+        Ok((socket, cipher)) => (socket, cipher),
+        Err(e) => {
+            error!("Handshake failed: {}", e);
+            return;
+        }
+    };
+
     let (reader, writer) = remote.into_split();
 
-    let mut reader = FramedRead::new(reader, LengthDelimitedCodec::new());
+    let mut reader = FramedRead::new(reader, make_length_delimited_codec());
 
     let (tx_to_server, _write_handle) = coalesce::spawn_write_task(
-        FramedWrite::new(writer, LengthDelimitedCodec::new()),
+        FramedWrite::new(writer, make_length_delimited_codec()),
         Arc::clone(&cipher),
     );
 
@@ -201,8 +210,8 @@ pub async fn run_proxy(remote: TcpStream, config: Arc<ConfigInfo>, cipher: Arc<C
         ) {
             Ok(frame) => frame,
             Err(e) => {
-                error!("Failed to decode frame: {}", e);
-                continue;
+                error!("Failed to decode frame: {}, disconnecting", e);
+                break;
             }
         };
 

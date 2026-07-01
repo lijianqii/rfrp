@@ -1,7 +1,8 @@
 use bytes::BytesMut;
 use flate2::Compression;
 use rfrp_config::config_info::base_types::{ClientInfo, DataInfo};
-use rfrp_proto::crypto::{Cipher, derive_key};
+use rfrp_proto::crypto::{Cipher, derive_key, derive_session_key};
+use rfrp_proto::compress::{self, MAX_DECOMPRESSED_SIZE};
 use rfrp_proto::frame_types::RfrpFrame;
 
 fn make_cipher() -> Cipher {
@@ -9,8 +10,6 @@ fn make_cipher() -> Cipher {
 }
 
 fn make_client_info() -> ClientInfo {
-    // ClientInfo fields are private; construct via its public Deserialize + init.
-    // We build a minimal ConfigInfo JSON and extract the single client_proxy entry.
     let json = r#"{
         "running_mode": "Client",
         "server": { "server_ip": "127.0.0.1", "server_port": 11000, "auth_token": "t" },
@@ -27,8 +26,6 @@ fn make_client_info() -> ClientInfo {
 
 #[test]
 fn diag_compress_decompress_roundtrip() {
-    // Isolate the compress/decompress layer to see if it is the culprit.
-    use rfrp_proto::compress;
     let original: Vec<u8> = (0..200u32).flat_map(|i| i.to_le_bytes()).collect();
 
     let mut dst = BytesMut::with_capacity(65536);
@@ -53,7 +50,6 @@ fn diag_compress_decompress_roundtrip() {
 
 #[test]
 fn diag_crypto_roundtrip() {
-    // Isolate the AES-GCM layer.
     let cipher = make_cipher();
     let plaintext = b"hello rfrp crypto layer";
     let mut buf: Vec<u8> = plaintext.to_vec();
@@ -70,7 +66,6 @@ fn diag_crypto_roundtrip() {
 
 #[test]
 fn diag_msgpack_register_roundtrip() {
-    // Isolate the MessagePack (de)serialization layer, no crypto/compress.
     let ci = make_client_info();
     let frame = RfrpFrame::Register(ci);
     let encoded = RfrpFrame::encode(&frame);
@@ -94,7 +89,6 @@ fn roundtrip_register_frame() {
     let mut compress = flate2::Compress::new(Compression::fast(), false);
     let bytes = RfrpFrame::encode_encrypted(&frame, &cipher, &mut buf, &mut compress);
 
-    // Simulate what the server does: receive BytesMut from the codec.
     let mut recv = BytesMut::from(&bytes[..]);
     let mut decomp_buf = Vec::new();
     let mut decompress = flate2::Decompress::new(false);
@@ -116,9 +110,6 @@ fn roundtrip_register_frame() {
 
 #[test]
 fn roundtrip_multiple_frames_reuse_compressor() {
-    // The hot path reuses Compress/Decompress across frames. Verify that
-    // reusing them doesn't corrupt subsequent frames (a likely root cause
-    // of "failed to fill whole buffer" on the server).
     let cipher = make_cipher();
     let mut buf = BytesMut::with_capacity(65536);
     let mut compress = flate2::Compress::new(Compression::fast(), false);
@@ -154,16 +145,12 @@ fn roundtrip_multiple_frames_reuse_compressor() {
 
 #[test]
 fn roundtrip_heartbeat_frames() {
-    // Verify that ping/pong Control frames survive the full encode → encrypt →
-    // compress → decrypt → decompress → decode pipeline, and that the
-    // is_ping / is_pong helpers correctly identify them.
     let cipher = make_cipher();
     let mut buf = BytesMut::with_capacity(65536);
     let mut compress = flate2::Compress::new(Compression::fast(), false);
     let mut decomp_buf = Vec::new();
     let mut decompress = flate2::Decompress::new(false);
 
-    // Ping roundtrip
     let ping = RfrpFrame::new_ping_frame();
     assert!(ping.is_ping());
     assert!(!ping.is_pong());
@@ -177,7 +164,6 @@ fn roundtrip_heartbeat_frames() {
     assert!(decoded.is_ping(), "decoded frame should be a ping");
     assert!(!decoded.is_pong());
 
-    // Pong roundtrip
     let pong = RfrpFrame::new_pong_frame();
     assert!(!pong.is_ping());
     assert!(pong.is_pong());
@@ -192,4 +178,180 @@ fn roundtrip_heartbeat_frames() {
     assert!(decoded.is_pong(), "decoded frame should be a pong");
 
     println!("PASS: heartbeat ping/pong roundtrip OK");
+}
+
+// ─── Security fixes tests ───
+
+#[test]
+fn nonce_uniqueness_across_reconnects() {
+    // Simulate reconnection: same auth_token, different session keys
+    let token = "mytoken";
+
+    // Connection 1
+    let cn1: [u8; 32] = rand::random();
+    let sn1: [u8; 32] = rand::random();
+    let key1 = derive_session_key(token, &cn1, &sn1);
+    let c1 = Cipher::new(&key1);
+
+    // Connection 2 (reconnect)
+    let cn2: [u8; 32] = rand::random();
+    let sn2: [u8; 32] = rand::random();
+    let key2 = derive_session_key(token, &cn2, &sn2);
+    let c2 = Cipher::new(&key2);
+
+    assert_ne!(key1, key2, "session keys must differ across connections");
+
+    let data = b"test data";
+    let enc1 = c1.encrypt(data);
+    let enc2 = c2.encrypt(data);
+
+    // Decrypt each with its own cipher must succeed
+    let dec1 = c1.decrypt(&enc1).expect("c1 decrypt");
+    let dec2 = c2.decrypt(&enc2).expect("c2 decrypt");
+    assert_eq!(dec1, data);
+    assert_eq!(dec2, data);
+
+    // Decrypting c2's ciphertext with c1 must fail (different keys)
+    assert!(
+        c1.decrypt(&enc2).is_err(),
+        "cross-connection decryption must fail (different session keys)"
+    );
+
+    println!("PASS: nonce uniqueness across reconnects OK");
+}
+
+#[test]
+fn session_key_symmetric_derivation() {
+    let token = "shared-secret";
+    let client_nonce: [u8; 32] = [0xAA; 32];
+    let server_nonce: [u8; 32] = [0xBB; 32];
+
+    let key_client = derive_session_key(token, &client_nonce, &server_nonce);
+    let key_server = derive_session_key(token, &client_nonce, &server_nonce);
+
+    assert_eq!(key_client, key_server, "both sides must derive same key");
+
+    // Different order should produce different key
+    let key_reversed = derive_session_key(token, &server_nonce, &client_nonce);
+    assert_ne!(key_client, key_reversed, "order must matter");
+
+    println!("PASS: session key symmetry OK");
+}
+
+#[test]
+fn handshake_key_different_per_nonce() {
+    let token = "secret";
+    let cn: [u8; 32] = rand::random();
+    let sn: [u8; 32] = rand::random();
+
+    let key1 = derive_session_key(token, &cn, &sn);
+    let key2 = derive_session_key(token, &sn, &cn); // swapped
+    assert_ne!(key1, key2, "swapped nonces produce different keys");
+
+    let key3 = derive_session_key("wrong", &cn, &sn);
+    assert_ne!(key1, key3, "different token produces different key");
+
+    println!("PASS: handshake key uniqueness OK");
+}
+
+#[test]
+fn decompression_bomb_detected() {
+    use flate2::{Compress, Decompress, Compression, FlushCompress};
+
+    // Create a highly compressible payload (all zeros) that decompresses large
+    let original = vec![0u8; 1024 * 1024]; // 1 MB of zeros
+
+    let mut compressed = Vec::new();
+    {
+        let mut c = Compress::new(Compression::best(), false);
+        let mut buf = [0u8; 8192];
+        let mut input = &original[..];
+        loop {
+            let before_in = c.total_in();
+            let status = c.compress(input, &mut buf, FlushCompress::Finish).unwrap();
+            let consumed = (c.total_in() - before_in) as usize;
+            compressed.extend_from_slice(&buf[..(c.total_out() as usize - compressed.len())]);
+            input = &input[consumed..];
+            if status == flate2::Status::StreamEnd {
+                break;
+            }
+        }
+    }
+
+    println!("1MB zeros compressed to {} bytes", compressed.len());
+    assert!(compressed.len() < 2000, "zeros should compress well (got {})", compressed.len());
+
+    // Decompress without limit — should succeed
+    let mut decomp_buf = Vec::new();
+    let mut d = Decompress::new(false);
+    assert!(compress::decompress_into_vec(&compressed, &mut decomp_buf, &mut d).is_ok());
+    assert_eq!(decomp_buf.len(), original.len());
+
+    // Now test that a payload exceeding the limit is rejected.
+    // We create a valid DEFLATE stream that decompresses to a bit over MAX_DECOMPRESSED_SIZE.
+    // Strategy: compress a large zero-payload, then decompress — the built-in limit
+    // in decompress_into_vec will catch it.
+    let huge = vec![0u8; MAX_DECOMPRESSED_SIZE + 1024];
+    let mut huge_compressed = Vec::new();
+    {
+        let mut c = Compress::new(Compression::best(), false);
+        let mut buf = [0u8; 8192];
+        let mut input = &huge[..];
+        loop {
+            let before_in = c.total_in();
+            let before_out = c.total_out();
+            let status = c.compress(input, &mut buf, FlushCompress::Finish).unwrap();
+            let consumed = (c.total_in() - before_in) as usize;
+            let written = (c.total_out() - before_out) as usize;
+            huge_compressed.extend_from_slice(&buf[..written]);
+            input = &input[consumed..];
+            if status == flate2::Status::StreamEnd {
+                break;
+            }
+        }
+    }
+
+    let mut bomb_buf = Vec::new();
+    let mut d2 = Decompress::new(false);
+    let result = compress::decompress_into_vec(&huge_compressed, &mut bomb_buf, &mut d2);
+    assert!(result.is_err(), "decompression bomb must be rejected");
+    assert!(
+        result.unwrap_err().contains("Decompression bomb"),
+        "error must mention decompression bomb"
+    );
+
+    println!("PASS: decompression bomb detection OK");
+}
+
+#[test]
+fn decompress_valid_payload_still_works() {
+    // Verify that the size limit doesn't break legitimate decompression
+    use flate2::{Compress, Decompress, Compression, FlushCompress};
+
+    let payload = b"hello world this is a legitimate rfrp data frame payload";
+    let mut compressed = Vec::new();
+    {
+        let mut c = Compress::new(Compression::fast(), false);
+        let mut buf = [0u8; 8192];
+        let mut input: &[u8] = payload;
+        loop {
+            let before_in = c.total_in();
+            let before_out = c.total_out();
+            let status = c.compress(input, &mut buf, FlushCompress::Finish).unwrap();
+            let consumed = (c.total_in() - before_in) as usize;
+            let written = (c.total_out() - before_out) as usize;
+            compressed.extend_from_slice(&buf[..written]);
+            input = &input[consumed..];
+            if status == flate2::Status::StreamEnd {
+                break;
+            }
+        }
+    }
+
+    let mut decomp_buf = Vec::new();
+    let mut d = Decompress::new(false);
+    compress::decompress_into_vec(&compressed, &mut decomp_buf, &mut d).expect("decompress failed");
+    assert_eq!(&decomp_buf[..], &payload[..]);
+
+    println!("PASS: legitimate decompression still works OK");
 }

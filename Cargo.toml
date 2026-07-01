@@ -22,6 +22,7 @@ aes-gcm = "0.10"
 sha2 = "0.10"
 rmp-serde = "1"
 flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
+rand = "0.8"
 
 [profile.release]
 opt-level = 3

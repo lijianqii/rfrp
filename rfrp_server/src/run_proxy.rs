@@ -1,15 +1,16 @@
 use dashmap::DashMap;
 use log::{debug, error, info, warn};
 use rfrp_proto::coalesce;
-use rfrp_proto::crypto::{self, Cipher};
 use rfrp_proto::frame_handle::{RoutingTable, handle_reg_frame};
 use rfrp_proto::frame_types::RfrpFrame;
+use rfrp_proto::handshake;
+use rfrp_proto::make_length_delimited_codec;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::task::{self, JoinHandle};
 use tokio::time::Instant;
 use tokio_stream::StreamExt;
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use tokio_util::codec::{FramedRead, FramedWrite};
 
 /// Maps proxy_id → its per-connection routing table.
 /// Uses DashMap for lock-free concurrent reads; writes (registration)
@@ -35,16 +36,19 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
         warn!("Failed to set TCP_NODELAY on client socket: {}", e);
     }
 
-    let key = crypto::derive_key(&auth_token);
-    let cipher = Arc::new(Cipher::new(&key));
-    info!("Auth token configured, encryption enabled");
+    let (client, cipher) = match handshake::server_handshake(client, &auth_token).await {
+        Ok((socket, cipher)) => (socket, cipher),
+        Err(e) => {
+            error!("Handshake failed: {}", e);
+            return;
+        }
+    };
 
     let (reader, writer) = client.into_split();
-
-    let mut reader = FramedRead::new(reader, LengthDelimitedCodec::new());
+    let mut reader = FramedRead::new(reader, make_length_delimited_codec());
 
     let (tx_channel, _write_handle) = coalesce::spawn_write_task(
-        FramedWrite::new(writer, LengthDelimitedCodec::new()),
+        FramedWrite::new(writer, make_length_delimited_codec()),
         Arc::clone(&cipher),
     );
 
@@ -99,8 +103,8 @@ pub async fn run_proxy(client: TcpStream, auth_token: String) {
         ) {
             Ok(frame) => frame,
             Err(e) => {
-                error!("Failed to decode frame from client: {}", e);
-                continue;
+                error!("Failed to decode frame from client: {}, disconnecting", e);
+                break;
             }
         };
 

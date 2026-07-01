@@ -32,7 +32,19 @@ pub async fn handle_reg_frame(
 ) {
     let client_info = Arc::new(client_info);
     let proxy_name: Arc<str> = Arc::from(client_info.get_name());
-    let listener = match TcpListener::bind(format!("0.0.0.0:{}", client_info.get_bind_port())).await
+
+    let bind_port = client_info.get_bind_port();
+    if bind_port < 1024 {
+        error!(
+            "Proxy '{}': rejected bind_port {} (privileged ports < 1024 not allowed)",
+            proxy_name, bind_port
+        );
+        let reject = RfrpFrame::new_reg_ack_frame(&client_info, false, 0);
+        let _ = tx_channel.send(reject).await;
+        return;
+    }
+
+    let listener = match TcpListener::bind(format!("0.0.0.0:{}", bind_port)).await
     {
         Ok(listener) => {
             info!(

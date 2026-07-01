@@ -21,6 +21,11 @@ pub fn rfrp_main() {
 
     configs.debug_info();
 
+    if let Err(e) = configs.validate() {
+        error!("Configuration validation failed: {}", e);
+        return;
+    }
+
     rfrp_run(configs);
 }
 
